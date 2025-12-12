@@ -19,17 +19,18 @@ limitations under the License.
 
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/portable_tensor_utils.h"
+
 #include "cfu.h"
 
 namespace tflite {
 namespace reference_integer_ops {
 
-int32_t oc_quantize(int32_t value, int32_t bias, int32_t output_offset, int32_t output_multiplier, int32_t output_shift) {
+inline int32_t oc_quantize(int32_t value, int32_t bias, int32_t output_offset, int32_t output_multiplier, int32_t output_shift) {
   value = value + bias;
   value = MultiplyByQuantizedMultiplier(value, output_multiplier, output_shift);
   value = value + output_offset;
   value = std::max(value, (int32_t)-128);
-  value = std::min(value, (int32_t)127);
+  value = std::min(value, (int32_t) 127);
   return value;
 }
 
@@ -45,7 +46,6 @@ inline void ConvPerChannel(
   const int32_t input_offset = params.input_offset;
   const int stride_width = params.stride_width;
   const int pad_width = params.padding_values.width;
-  // const int pad_height = params.padding_values.height; // Unused
   const int32_t output_offset = params.output_offset;
 
   const int input_depth = input_shape.Dims(3);
@@ -56,111 +56,53 @@ inline void ConvPerChannel(
   const int output_width = output_shape.Dims(2);
 
   // Optimization for 1D convolution
-  constexpr int XLANES  = 8; // 一次 8 個 out_x
-  constexpr int OCLANES = 8; // 一次 8 個 out_channel
+  const int num_lanes = 8;
 
-  for (int out_x_base = 0; out_x_base < output_width; out_x_base += XLANES) {
-    int valid_x = std::min(XLANES, output_width - out_x_base);
+  for (int out_x = 0; out_x < output_width; ++out_x) {
+    const int in_x_origin = (out_x * stride_width) - pad_width;
 
-    // 對應到原本的 oc_base loop，只是固定每組 8 個 channel
-    for (int oc_base = 0; oc_base < output_depth; oc_base += OCLANES) {
-      int valid_oc = std::min(OCLANES, output_depth - oc_base);
-
-      // acc[x_lane][oc_lane]：8 個 activation lane × 8 個 out_channel lane
-      // Reset CFU accumulators
-      cfu_op0(14, 0, 0); // RESET_ACC
-      cfu_op0(10, input_offset, 0); // SET_INPUT_OFFSET
+    // ===== 每 num_lanes 個 output channel 為一組處理 =====
+    for (int oc_base = 0; oc_base < output_depth; oc_base += num_lanes) {
+      int valid_lanes = std::min(num_lanes, output_depth - oc_base);
+      int32_t acc[num_lanes] = {0};
 
       // ======= Convolution accumulation =======
       for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
+        const int in_x = in_x_origin + filter_x;
 
-        // 各個 out_x lane 對應的 in_x
-        int in_x_vec[XLANES];
-        for (int x_lane = 0; x_lane < valid_x; ++x_lane) {
-          int out_x = out_x_base + x_lane;
-          in_x_vec[x_lane] = (out_x * stride_width) - pad_width + filter_x;
+        // Skip if out of bounds
+        if (in_x < 0 || in_x >= input_width) {
+          continue;
         }
 
         for (int in_channel = 0; in_channel < input_depth; ++in_channel) {
+          // ---- input-stationary：這裡每次只讀一次 input ----
+          int32_t input_val = input_data[Offset(input_shape, 0, 0, in_x, in_channel)] + input_offset;
 
-          // ---- 一次拿 8 個 input activation：in0..in7 ----
-          int8_t in_val_raw[XLANES];
-          for (int x_lane = 0; x_lane < valid_x; ++x_lane) {
-            int in_x = in_x_vec[x_lane];
-            if (in_x < 0 || in_x >= input_width) {
-              in_val_raw[x_lane] = -input_offset;  // padding: input + offset = 0
-            } else {
-              in_val_raw[x_lane] =
-                  input_data[Offset(input_shape, 0, 0, in_x, in_channel)];
-            }
+          // ---- 對 num_lanes 個 out_channel 做平行加總 ----
+          for (int lane = 0; lane < valid_lanes; ++lane) {
+            int oc = oc_base + lane;
+            int8_t filter_val = filter_data[Offset(filter_shape, oc, 0, filter_x, in_channel)];
+            acc[lane] += filter_val * input_val;
           }
-          // Zero out remaining lanes
-          for (int x_lane = valid_x; x_lane < XLANES; ++x_lane) {
-            in_val_raw[x_lane] = -input_offset;
-          }
-
-          // Pack inputs
-          uint32_t input_pack_0 = 0;
-          uint32_t input_pack_1 = 0;
-          for (int i=0; i<4; ++i) input_pack_0 |= ((uint8_t)in_val_raw[i] << (i*8));
-          for (int i=0; i<4; ++i) input_pack_1 |= ((uint8_t)in_val_raw[i+4] << (i*8));
-          
-          cfu_op0(11, input_pack_0, input_pack_1); // SET_INPUTS
-
-          // ---- 8 個 out_channel 對應的 weight：w0..w7 ----
-          int8_t w_vec[OCLANES];
-          for (int oc_lane = 0; oc_lane < valid_oc; ++oc_lane) {
-            int oc = oc_base + oc_lane;
-            w_vec[oc_lane] =
-                filter_data[Offset(filter_shape, oc, 0, filter_x, in_channel)];
-          }
-          // Zero out remaining weights
-          for (int oc_lane = valid_oc; oc_lane < OCLANES; ++oc_lane) {
-            w_vec[oc_lane] = 0;
-          }
-
-          // Pack weights
-          uint32_t weight_pack_0 = 0;
-          uint32_t weight_pack_1 = 0;
-          for (int i=0; i<4; ++i) weight_pack_0 |= ((uint8_t)w_vec[i] << (i*8));
-          for (int i=0; i<4; ++i) weight_pack_1 |= ((uint8_t)w_vec[i+4] << (i*8));
-          
-          cfu_op0(12, weight_pack_0, weight_pack_1); // RUN_WEIGHTS
-
-        } // end in_channel
-      }   // end filter_x
-
-      // Read back accumulators
-      int32_t acc[XLANES][OCLANES];
-      for (int x_lane = 0; x_lane < XLANES; ++x_lane) {
-        for (int oc_lane = 0; oc_lane < OCLANES; ++oc_lane) {
-          int index = (x_lane << 3) | oc_lane;
-          acc[x_lane][oc_lane] = cfu_op0(13, index, 0);
         }
       }
 
       // ======= Bias + Quant + store output =======
-      for (int x_lane = 0; x_lane < valid_x; ++x_lane) {
-        int out_x = out_x_base + x_lane;
-        for (int oc_lane = 0; oc_lane < valid_oc; ++oc_lane) {
-          int oc = oc_base + oc_lane;
+      for (int lane = 0; lane < valid_lanes; ++lane) {
+        int oc = oc_base + lane;
 
-          int32_t value = acc[x_lane][oc_lane];
-          int32_t bias  = bias_data[oc];
-          int32_t mul   = output_multiplier[oc];
-          int32_t shift = output_shift[oc];
+        int32_t value = acc[lane];
+        int32_t bias  = bias_data[oc];
+        int32_t mul   = output_multiplier[oc];
+        int32_t shift = output_shift[oc];
 
-          value = oc_quantize(value, bias, output_offset, mul, shift);
+        value = oc_quantize(value, bias, output_offset, mul, shift);
 
-          output_data[Offset(output_shape, 0, 0, out_x, oc)] =
-              static_cast<int8_t>(value);
-        }
+        output_data[Offset(output_shape, 0, 0, out_x, oc)] = static_cast<int8_t>(value);
       }
-
-    } // end oc_base
-  }   // end out_x_base
-
-  return;
+    }
+  }
 }
 
 inline void ConvPerChannelWithPackedInt4Weights(
