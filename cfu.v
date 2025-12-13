@@ -36,8 +36,9 @@ assign cmd_ready = rsp_ready;
 wire [6:0] funct7 = cmd_payload_function_id[9:3];
 // Mode 0: Get TPU busy status
 // Mode 1: Set K, M, N and start computation
-// Mode 2: Write A buffer
-// Mode 3: Write B buffer
+// Mode 2: Not used
+// Mode 3: Write A buffer
+// Mode 4: Write B buffer
 // Mode 5: Read C buffer
 
 always @(*) begin
