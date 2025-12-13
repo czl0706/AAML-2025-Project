@@ -88,6 +88,7 @@ inline void ConvPerChannel(
           const int in_y = in_y_origin + filter_y;
           const int off_y = filter_y * filter_width;
 
+          #pragma GCC unroll 4
           for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
             // const int in_x = in_x_origin + filter_x * dilation_width_factor;
             const int in_x = in_x_origin + filter_x;
@@ -97,9 +98,11 @@ inline void ConvPerChannel(
                 ((uint32_t)in_x < (uint32_t)input_width) &&
                 ((uint32_t)in_y < (uint32_t)input_height);
 
-            m_im2col[row][col] = is_inside
-                ? input_data[Offset(input_shape, 0, in_y, in_x, in_channel)]
-                : neg_in_off;
+            if (!is_inside) [[unlikely]] {
+                m_im2col[row][col] = neg_in_off;
+            } else {
+                m_im2col[row][col] = input_data[Offset(input_shape, 0, in_y, in_x, in_channel)];
+            }
           }
         }
       }
@@ -109,6 +112,7 @@ inline void ConvPerChannel(
   for (int in_channel = 0; in_channel < filter_input_depth; ++in_channel) {
     for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
       const int off_y = filter_y * filter_width;
+      #pragma GCC unroll 4
       for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
         const int row = in_channel * img_off + off_y + filter_x;
         for (int col = 0; col < output_depth; ++col) {
@@ -149,6 +153,7 @@ inline void ConvPerChannel(
       cfu_op0(2, 0, 0);
       // Load matrix B (kernel tiles) into CFU
       for (int col = krnl_x; col < kx; col += 4) {
+        #pragma GCC unroll 4
         for (int row = krnl_y; row < ky; ++row) {
           cfu_in[3] = (row < kernel_rows && col + 0 < output_depth)
               ? m_kernel[col + 0][row] : 0;
@@ -235,7 +240,8 @@ inline void ConvPerChannel(
           const int col_valid_end = std::min(ky, kernel_rows);
 
           // 1) If all four lanes are out of bounds: the entire row-tile will only send padding
-          if (!v0 && !v1 && !v2 && !v3) {
+          if (!v0 && !v1 && !v2 && !v3) [[unlikely]] {
+            #pragma GCC unroll 4
             for (int col = col_begin; col < ky; ++col) {
               cfu_op0(3, 0, pad_word);
             }
@@ -243,6 +249,7 @@ inline void ConvPerChannel(
           }
 
           // 2) Valid col region: read m_im2col (each lane only reads when row is valid)
+          #pragma GCC unroll 4
           for (int col = col_begin; col < col_valid_end; ++col) {
             const uint8_t b3 = v0 ? static_cast<uint8_t>(m_im2col[r0][col]) : pad8;
             const uint8_t b2 = v1 ? static_cast<uint8_t>(m_im2col[r1][col]) : pad8;
@@ -253,6 +260,7 @@ inline void ConvPerChannel(
           }
 
           // 3) Padding col region: send neg_in_off (do not read memory)
+          #pragma GCC unroll 4
           for (int col = col_valid_end; col < ky; ++col) {
             cfu_op0(3, 0, pad_word);
           }

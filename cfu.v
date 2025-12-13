@@ -134,6 +134,7 @@ wire [15:0]  A_index_TPU;
 wire [15:0]  B_index_TPU; 
 wire [15:0]  C_index_TPU; 
 
+wire         C_wr_en_TPU;
 wire [127:0] C_data_in_TPU; 
 
 TPU u_TPU (
