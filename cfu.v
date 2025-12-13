@@ -54,18 +54,20 @@ always @(*) begin
     end 
 end
 
+reg [13:0] write_index;
+
 wire        A_wr_en   = (cmd_valid && funct7 == 3);
-wire [13:0] A_index   = A_wr_en ? cmd_payload_inputs_0[13:0] : A_index_TPU[13:0];
+wire [13:0] A_index   = A_wr_en ? write_index : A_index_TPU[13:0];
 wire [31:0] A_data_in = cmd_payload_inputs_1;
 wire [31:0] A_data_out;
 
 wire        B_wr_en   = (cmd_valid && funct7 == 4);
-wire [13:0] B_index   = B_wr_en ? cmd_payload_inputs_0[13:0] : B_index_TPU[13:0];
+wire [13:0] B_index   = B_wr_en ? write_index : B_index_TPU[13:0];
 wire [31:0] B_data_in = cmd_payload_inputs_1;
 wire [31:0] B_data_out;
 
 wire         C_wr_en   = C_wr_en_TPU;
-wire [ 13:0] C_index   = (cmd_valid && funct7 == 5) ? cmd_payload_inputs_0[13:0] : C_index_TPU[13:0];
+wire [ 13:0] C_index   = (cmd_valid && funct7 == 5) ? read_index : C_index_TPU[13:0];
 wire [127:0] C_data_in = C_data_in_TPU;
 wire [127:0] C_data_out;
 
@@ -74,6 +76,13 @@ reg [ 9:0] K;
 reg [ 9:0] N;
 reg [31:0] offset;
 reg        in_valid;
+
+reg [13:0] read_index;
+reg [ 9:0] read_r;
+reg [ 9:0] read_c;
+
+wire [ 9:0] Nb_M = M[9:2] + |M[1:0];
+wire [13:0] stride_col = {4'b0, Nb_M, 2'b00};
 
 always @(posedge clk) begin
     if (cmd_valid && funct7 == 1) begin
@@ -86,6 +95,32 @@ always @(posedge clk) begin
     end
     else begin
         in_valid <= 1'b0;
+    end
+
+    if (cmd_valid && funct7 == 2) begin
+        write_index <= 0;
+    end else if (A_wr_en || B_wr_en) begin
+        write_index <= write_index + 1;
+    end
+
+    // Reset read_index (funct7=6)
+    if (cmd_valid && funct7 == 6) begin
+        read_index <= 0;
+        read_r <= 0;
+        read_c <= 0;
+    end 
+    // Auto-increment read_index when reading the last word (index 3)
+    else if (cmd_valid && funct7 == 5 && cmd_payload_inputs_1 == 3) begin
+        if (read_c + 4 >= N) begin
+            // End of row, move to next row
+            read_c <= 0;
+            read_r <= read_r + 1;
+            read_index <= {4'b0, read_r} + 1;
+        end else begin
+            // Next column block
+            read_c <= read_c + 4;
+            read_index <= read_index + stride_col;
+        end
     end
 end
 

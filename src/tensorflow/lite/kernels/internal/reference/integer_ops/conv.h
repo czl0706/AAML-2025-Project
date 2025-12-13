@@ -144,9 +144,9 @@ inline void ConvPerChannel(
       const int nn = std::min(TILE_N, output_depth - krnl_x);
       const int kx = krnl_x + nn;
 
-      int idx = 0;
       int8_t cfu_in[4];
 
+      cfu_op0(2, 0, 0);
       // Load matrix B (kernel tiles) into CFU
       for (int col = krnl_x; col < kx; col += 4) {
         for (int row = krnl_y; row < ky; ++row) {
@@ -159,8 +159,7 @@ inline void ConvPerChannel(
           cfu_in[0] = (row < kernel_rows && col + 3 < output_depth)
               ? m_kernel[col + 3][row] : 0;
 
-          cfu_op0(4, idx, *(int32_t*)cfu_in);
-          ++idx;
+          cfu_op0(4, 0, *(int32_t*)cfu_in);
         }
       }
 
@@ -199,8 +198,8 @@ inline void ConvPerChannel(
         const int mm = std::min(TILE_M, im2col_rows - img_y);
         const int my = img_y + mm;
 
-        idx = 0;  
         // // Load matrix A (im2col tiles) into CFU
+        // cfu_op0(2, 0, 0);
         // for (int row = img_y; row < my; row += 4) {
         //   for (int col = krnl_y; col < ky; ++col) {
         //     cfu_in[3] = (row + 0 < im2col_rows && col < kernel_rows)
@@ -212,12 +211,12 @@ inline void ConvPerChannel(
         //     cfu_in[0] = (row + 3 < im2col_rows && col < kernel_rows)
         //         ? m_im2col[row + 3][col] : neg_in_off;
 
-        //     cfu_op0(3, idx, *(int32_t*)cfu_in);
-        //     ++idx;
+        //     cfu_op0(3, 0, *(int32_t*)cfu_in);
         //   }
         // }
 
         // Load matrix A (im2col tiles) into CFU
+        cfu_op0(2, 0, 0);
         for (int row = img_y; row < my; row += 4) {
           const int r0 = row + 0;
           const int r1 = row + 1;
@@ -238,7 +237,7 @@ inline void ConvPerChannel(
           // 1) If all four lanes are out of bounds: the entire row-tile will only send padding
           if (!v0 && !v1 && !v2 && !v3) {
             for (int col = col_begin; col < ky; ++col) {
-              cfu_op0(3, idx++, pad_word);
+              cfu_op0(3, 0, pad_word);
             }
             continue;
           }
@@ -250,12 +249,12 @@ inline void ConvPerChannel(
             const uint8_t b1 = v2 ? static_cast<uint8_t>(m_im2col[r2][col]) : pad8;
             const uint8_t b0 = v3 ? static_cast<uint8_t>(m_im2col[r3][col]) : pad8;
 
-            cfu_op0(3, idx++, pack4_u8(b3, b2, b1, b0));
+            cfu_op0(3, 0, pack4_u8(b3, b2, b1, b0));
           }
 
           // 3) Padding col region: send neg_in_off (do not read memory)
           for (int col = col_valid_end; col < ky; ++col) {
-            cfu_op0(3, idx++, pad_word);
+            cfu_op0(3, 0, pad_word);
           }
         }
 
@@ -263,16 +262,18 @@ inline void ConvPerChannel(
         cfu_op0(1, input_offset, mm << 20 | kk << 10 | nn);
         while (cfu_op0(0, 0, 0)) { }
 
+        // Reset address generator
+        // User requested: send krnl_x, img_y, mm
+        cfu_op0(6, (krnl_x << 16) | img_y, mm);
+
+        // Read results using CFU address generation
+        // Revert loops: row (outer), col (inner) as requested
         for (int row = img_y; row < my; ++row) {
           for (int col = krnl_x; col < kx; col += 4) {
-            const int col_off = col - krnl_x;
-            const int row_off = row - img_y;
-            const int base_idx = row_off + (col_off >> 2) * mm;
-
-            mm_result[row][col + 0] += cfu_op0(5, base_idx, 0);
-            mm_result[row][col + 1] += cfu_op0(5, base_idx, 1);
-            mm_result[row][col + 2] += cfu_op0(5, base_idx, 2);
-            mm_result[row][col + 3] += cfu_op0(5, base_idx, 3);
+            mm_result[row][col + 0] += cfu_op0(5, 0, 0);
+            mm_result[row][col + 1] += cfu_op0(5, 0, 1);
+            mm_result[row][col + 2] += cfu_op0(5, 0, 2);
+            mm_result[row][col + 3] += cfu_op0(5, 0, 3); // Increments address
           }
         }
       }
