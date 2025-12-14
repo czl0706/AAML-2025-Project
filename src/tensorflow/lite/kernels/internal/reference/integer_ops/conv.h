@@ -35,8 +35,12 @@ constexpr int kMaxIm2ColRows = 148;
 constexpr int kMaxIm2ColCols = 8000;
 constexpr int kMaxOutputDepth = 2000;
 
-int8_t  m_kernel[kMaxOutputDepth][kMaxIm2ColCols];
-int8_t  m_im2col[kMaxIm2ColRows][kMaxIm2ColCols];
+constexpr int kMaxIm2ColRows4 = (kMaxIm2ColRows + 3) / 4;
+constexpr int kMaxOutputDepth4 = (kMaxOutputDepth + 3) / 4;
+
+// Packed buffers: [K][M/4] and [K][N/4]
+uint32_t m_im2col_packed[kMaxIm2ColCols][kMaxIm2ColRows4];
+uint32_t m_kernel_packed[kMaxIm2ColCols][kMaxOutputDepth4];
 int32_t mm_result[kMaxIm2ColRows][kMaxOutputDepth];
 
 // Fixed-point per-channel-quantization convolution reference kernel.
@@ -73,66 +77,86 @@ inline void ConvPerChannel(
 
   const int8_t neg_in_off = static_cast<int8_t>(-input_offset);
 
+  const int M = output_height * output_width;                         // im2col_rows
+  const int K = filter_height * filter_width * filter_input_depth;    // kernel_rows
   const int img_off = filter_height * filter_width;
-  for (int out_y = 0; out_y < output_height; ++out_y) {
-    // const int in_y_origin = (out_y * stride_height) - pad_height;
-    const int in_y_origin = out_y - pad_height;
+  const int M4 = (M + 3) >> 2;
 
-    for (int out_x = 0; out_x < output_width; ++out_x) {
-      const int in_x_origin = (out_x * stride_width) - pad_width;
-      const int row = out_y * output_width + out_x;
+  for (int k = 0; k < K; ++k) {
+    // k -> (in_channel, filter_y, filter_x)
+    const int in_channel = k / img_off;
+    const int rem = k - in_channel * img_off;
+    const int filter_y = rem / filter_width;
+    const int filter_x = rem - filter_y * filter_width;
 
-      for (int in_channel = 0; in_channel < filter_input_depth; ++in_channel) {
-        for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
-          // const int in_y = in_y_origin + filter_y * dilation_height_factor;
-          const int in_y = in_y_origin + filter_y;
-          const int off_y = filter_y * filter_width;
+    for (int mg = 0; mg < M4; ++mg) {
+      const int r0 = mg*4 + 0;
+      const int r1 = mg*4 + 1;
+      const int r2 = mg*4 + 2;
+      const int r3 = mg*4 + 3;
 
-          #pragma GCC unroll 4
-          for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
-            // const int in_x = in_x_origin + filter_x * dilation_width_factor;
-            const int in_x = in_x_origin + filter_x;
-            const int col = in_channel * img_off + off_y + filter_x;
+      auto load_row = [&](int r)->uint8_t {
+        if (r >= M) return 0; // M padding：GEMM padding 用 0
+        const int out_y = r / output_width;
+        const int out_x = r - out_y * output_width;
 
-            const bool is_inside =
-                ((uint32_t)in_x < (uint32_t)input_width) &&
-                ((uint32_t)in_y < (uint32_t)input_height);
+        const int in_y_origin = out_y - pad_height;                   // 你現在 height stride=1 的寫法
+        const int in_x_origin = (out_x * stride_width) - pad_width;
 
-            if (!is_inside) [[unlikely]] {
-                m_im2col[row][col] = neg_in_off;
-            } else {
-                m_im2col[row][col] = input_data[Offset(input_shape, 0, in_y, in_x, in_channel)];
-            }
-          }
-        }
-      }
+        const int in_y = in_y_origin + filter_y;
+        const int in_x = in_x_origin + filter_x;
+
+        const bool inside =
+          ((uint32_t)in_x < (uint32_t)input_width) &&
+          ((uint32_t)in_y < (uint32_t)input_height);
+
+        if (!inside) return (uint8_t)neg_in_off;                      // 影像邊界 padding：neg_in_off
+        return (uint8_t)input_data[Offset(input_shape, 0, in_y, in_x, in_channel)];
+      };
+
+      const uint8_t a3 = load_row(r0);
+      const uint8_t a2 = load_row(r1);
+      const uint8_t a1 = load_row(r2);
+      const uint8_t a0 = load_row(r3);
+
+      m_im2col_packed[k][mg] = pack4_u8(a3,a2,a1,a0);
     }
   }
 
-  for (int in_channel = 0; in_channel < filter_input_depth; ++in_channel) {
-    for (int filter_y = 0; filter_y < filter_height; ++filter_y) {
-      const int off_y = filter_y * filter_width;
-      #pragma GCC unroll 4
-      for (int filter_x = 0; filter_x < filter_width; ++filter_x) {
-        const int row = in_channel * img_off + off_y + filter_x;
-        for (int col = 0; col < output_depth; ++col) {
-          m_kernel[col][row] = filter_data[Offset(
-                    filter_shape, col, filter_y, filter_x, in_channel)];
-        }
-      }
+  const int N = output_depth;
+  const int N4 = (N + 3) >> 2;
+
+  for (int k = 0; k < K; ++k) {
+    const int in_channel = k / img_off;
+    const int rem = k - in_channel * img_off;
+    const int filter_y = rem / filter_width;
+    const int filter_x = rem - filter_y * filter_width;
+
+    for (int ng = 0; ng < N4; ++ng) {
+      const int c0 = ng*4 + 0;
+      const int c1 = ng*4 + 1;
+      const int c2 = ng*4 + 2;
+      const int c3 = ng*4 + 3;
+
+      const uint8_t b3 = (c0 < N) ? (uint8_t)filter_data[Offset(filter_shape, c0, filter_y, filter_x, in_channel)] : 0;
+      const uint8_t b2 = (c1 < N) ? (uint8_t)filter_data[Offset(filter_shape, c1, filter_y, filter_x, in_channel)] : 0;
+      const uint8_t b1 = (c2 < N) ? (uint8_t)filter_data[Offset(filter_shape, c2, filter_y, filter_x, in_channel)] : 0;
+      const uint8_t b0 = (c3 < N) ? (uint8_t)filter_data[Offset(filter_shape, c3, filter_y, filter_x, in_channel)] : 0;
+
+      m_kernel_packed[k][ng] = pack4_u8(b3,b2,b1,b0);
     }
   }
 
   // Shape of matrices:
-  // m_im2col:   [output_height*output_width , filter_height*filter_width*filter_input_depth]
-  // m_kernel:   [filter_height*filter_width*filter_input_depth , output_depth]
-  // mm_result:  [output_height*output_width , output_depth]
+  // m_im2col_packed: [K][M/4]
+  // m_kernel_packed: [K][N/4]
+  // mm_result:       [M][N]
   const int TILE_M = 148; // im2col_rows
   const int TILE_K = 256; // kernel_rows
   const int TILE_N = 256; // output_depth
-  // const int T = 16;
-  const int im2col_rows = output_height * output_width;
-  const int kernel_rows = filter_height * filter_width * filter_input_depth;
+
+  const int im2col_rows = M;
+  const int kernel_rows = K;
 
   for (int row = 0; row < im2col_rows; ++row) {
     for (int col = 0; col < output_depth; ++col) {
@@ -148,121 +172,26 @@ inline void ConvPerChannel(
       const int nn = std::min(TILE_N, output_depth - krnl_x);
       const int kx = krnl_x + nn;
 
-      int8_t cfu_in[4];
-
-      cfu_op0(2, 0, 0);
       // Load matrix B (kernel tiles) into CFU
-      for (int col = krnl_x; col < kx; col += 4) {
-        #pragma GCC unroll 4
-        for (int row = krnl_y; row < ky; ++row) {
-          cfu_in[3] = (row < kernel_rows && col + 0 < output_depth)
-              ? m_kernel[col + 0][row] : 0;
-          cfu_in[2] = (row < kernel_rows && col + 1 < output_depth)
-              ? m_kernel[col + 1][row] : 0;
-          cfu_in[1] = (row < kernel_rows && col + 2 < output_depth)
-              ? m_kernel[col + 2][row] : 0;
-          cfu_in[0] = (row < kernel_rows && col + 3 < output_depth)
-              ? m_kernel[col + 3][row] : 0;
-
-          cfu_op0(4, 0, *(int32_t*)cfu_in);
+      cfu_op0(2, 0, 0);
+      for (int ng = krnl_x/4; ng < (krnl_x + TILE_N)/4; ++ng) {
+        if (ng >= N4) break; // Boundary check
+        for (int k = krnl_y; k < ky; ++k) {
+           cfu_op0(4, 0, m_kernel_packed[k][ng]);
         }
       }
-
-      // // Load matrix B (kernel tiles) into CFU
-      // for (int col = krnl_x; col < kx; col += 4) {
-      //   const int c0 = col + 0;
-      //   const int c1 = col + 1;
-      //   const int c2 = col + 2;
-      //   const int c3 = col + 3;
-
-      //   const bool oc0 = (c0 < output_depth);
-      //   const bool oc1 = (c1 < output_depth);
-      //   const bool oc2 = (c2 < output_depth);
-      //   const bool oc3 = (c3 < output_depth);
-
-      //   const int row_begin = krnl_y;
-      //   const int row_valid_end = std::min(ky, kernel_rows);
-
-      //   // 1) valid rows: row < kernel_rows
-      //   for (int row = row_begin; row < row_valid_end; ++row) {
-      //     const uint8_t b3 = oc0 ? static_cast<uint8_t>(m_kernel[c0][row]) : 0;
-      //     const uint8_t b2 = oc1 ? static_cast<uint8_t>(m_kernel[c1][row]) : 0;
-      //     const uint8_t b1 = oc2 ? static_cast<uint8_t>(m_kernel[c2][row]) : 0;
-      //     const uint8_t b0 = oc3 ? static_cast<uint8_t>(m_kernel[c3][row]) : 0;
-
-      //     cfu_op0(4, idx++, pack4_u8(b3, b2, b1, b0));
-      //   }
-
-      //   // 2) pad rows: row >= kernel_rows (or row beyond valid tile)
-      //   for (int row = row_valid_end; row < ky; ++row) {
-      //     cfu_op0(4, idx++, 0);
-      //   }
-      // }
-
-      for (int img_y = 0; img_y < im2col_rows; img_y += TILE_M) {
+      
+      const int img_y = 0;
+      // for (int img_y = 0; img_y < im2col_rows; img_y += TILE_M) {
         const int mm = std::min(TILE_M, im2col_rows - img_y);
         const int my = img_y + mm;
 
-        // // Load matrix A (im2col tiles) into CFU
-        // cfu_op0(2, 0, 0);
-        // for (int row = img_y; row < my; row += 4) {
-        //   for (int col = krnl_y; col < ky; ++col) {
-        //     cfu_in[3] = (row + 0 < im2col_rows && col < kernel_rows)
-        //         ? m_im2col[row + 0][col] : neg_in_off;
-        //     cfu_in[2] = (row + 1 < im2col_rows && col < kernel_rows)
-        //         ? m_im2col[row + 1][col] : neg_in_off;
-        //     cfu_in[1] = (row + 2 < im2col_rows && col < kernel_rows)
-        //         ? m_im2col[row + 2][col] : neg_in_off;
-        //     cfu_in[0] = (row + 3 < im2col_rows && col < kernel_rows)
-        //         ? m_im2col[row + 3][col] : neg_in_off;
-
-        //     cfu_op0(3, 0, *(int32_t*)cfu_in);
-        //   }
-        // }
-
         // Load matrix A (im2col tiles) into CFU
         cfu_op0(2, 0, 0);
-        for (int row = img_y; row < my; row += 4) {
-          const int r0 = row + 0;
-          const int r1 = row + 1;
-          const int r2 = row + 2;
-          const int r3 = row + 3;
-
-          const bool v0 = (r0 < im2col_rows);
-          const bool v1 = (r1 < im2col_rows);
-          const bool v2 = (r2 < im2col_rows);
-          const bool v3 = (r3 < im2col_rows);
-
-          const uint8_t pad8 = static_cast<uint8_t>(neg_in_off);
-          const uint32_t pad_word = pack4_u8(pad8, pad8, pad8, pad8);
-
-          const int col_begin = krnl_y;
-          const int col_valid_end = std::min(ky, kernel_rows);
-
-          // 1) If all four lanes are out of bounds: the entire row-tile will only send padding
-          if (!v0 && !v1 && !v2 && !v3) [[unlikely]] {
-            #pragma GCC unroll 4
-            for (int col = col_begin; col < ky; ++col) {
-              cfu_op0(3, 0, pad_word);
-            }
-            continue;
-          }
-
-          // 2) Valid col region: read m_im2col (each lane only reads when row is valid)
-          #pragma GCC unroll 4
-          for (int col = col_begin; col < col_valid_end; ++col) {
-            const uint8_t b3 = v0 ? static_cast<uint8_t>(m_im2col[r0][col]) : pad8;
-            const uint8_t b2 = v1 ? static_cast<uint8_t>(m_im2col[r1][col]) : pad8;
-            const uint8_t b1 = v2 ? static_cast<uint8_t>(m_im2col[r2][col]) : pad8;
-            const uint8_t b0 = v3 ? static_cast<uint8_t>(m_im2col[r3][col]) : pad8;
-
-            cfu_op0(3, 0, pack4_u8(b3, b2, b1, b0));
-          }
-
-          // 3) Padding col region: send neg_in_off (do not read memory)
-          #pragma GCC unroll 4
-          for (int col = col_valid_end; col < ky; ++col) {
-            cfu_op0(3, 0, pad_word);
+        for (int mg = img_y/4; mg < (img_y + TILE_M)/4; ++mg) {
+          if (mg >= M4) break; // Boundary check
+          for (int k = krnl_y; k < ky; ++k) {
+            cfu_op0(3, 0, m_im2col_packed[k][mg]);
           }
         }
 
@@ -275,7 +204,6 @@ inline void ConvPerChannel(
         cfu_op0(6, (krnl_x << 16) | img_y, mm);
 
         // Read results using CFU address generation
-        // Revert loops: row (outer), col (inner) as requested
         for (int row = img_y; row < my; ++row) {
           for (int col = krnl_x; col < kx; col += 4) {
             mm_result[row][col + 0] += cfu_op0(5, 0, 0);
@@ -284,7 +212,7 @@ inline void ConvPerChannel(
             mm_result[row][col + 3] += cfu_op0(5, 0, 3); // Increments address
           }
         }
-      }
+      // }
     }
   }
 
