@@ -1,3 +1,13 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "numpy",
+#   "pyserial",
+#   "tqdm",
+#   "jiwer",
+# ]
+# ///
+
 import argparse
 import csv
 import os

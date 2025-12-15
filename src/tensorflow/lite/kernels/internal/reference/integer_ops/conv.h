@@ -19,9 +19,10 @@ limitations under the License.
 
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/portable_tensor_utils.h"
-
+#include <cstdio>
 #include "cfu.h"
 #include "perf.h"
+
 #define UNUSED(x) (void)(x)
 
 namespace tflite {
@@ -39,9 +40,9 @@ constexpr int kMaxIm2ColRows4 = (kMaxIm2ColRows + 3) / 4;
 constexpr int kMaxOutputDepth4 = (kMaxOutputDepth + 3) / 4;
 
 // Packed buffers: [K][M/4] and [K][N/4]
-uint32_t m_im2col_packed[kMaxIm2ColCols][kMaxIm2ColRows4];
-uint32_t m_kernel_packed[kMaxIm2ColCols][kMaxOutputDepth4];
-int32_t mm_result[kMaxIm2ColRows][kMaxOutputDepth];
+static uint32_t m_im2col_packed[kMaxIm2ColCols][kMaxIm2ColRows4];
+// static uint32_t m_kernel_packed[kMaxIm2ColCols][kMaxOutputDepth4];
+static int32_t mm_result[kMaxIm2ColRows][kMaxOutputDepth];
 
 // Fixed-point per-channel-quantization convolution reference kernel.
 inline void ConvPerChannel(
@@ -52,7 +53,6 @@ inline void ConvPerChannel(
     const int32_t* bias_data, const RuntimeShape& output_shape,
     int8_t* output_data) {
   perf_enable_counter(6);
-
   // Get parameters.
   const int32_t input_offset = params.input_offset;  // r = s(q - Z)
   const int stride_width = params.stride_width;
@@ -123,30 +123,6 @@ inline void ConvPerChannel(
     }
   }
 
-  const int N = output_depth;
-  const int N4 = (N + 3) >> 2;
-
-  for (int k = 0; k < K; ++k) {
-    const int in_channel = k / img_off;
-    const int rem = k - in_channel * img_off;
-    const int filter_y = rem / filter_width;
-    const int filter_x = rem - filter_y * filter_width;
-
-    for (int ng = 0; ng < N4; ++ng) {
-      const int c0 = ng*4 + 0;
-      const int c1 = ng*4 + 1;
-      const int c2 = ng*4 + 2;
-      const int c3 = ng*4 + 3;
-
-      const uint8_t b3 = (c0 < N) ? (uint8_t)filter_data[Offset(filter_shape, c0, filter_y, filter_x, in_channel)] : 0;
-      const uint8_t b2 = (c1 < N) ? (uint8_t)filter_data[Offset(filter_shape, c1, filter_y, filter_x, in_channel)] : 0;
-      const uint8_t b1 = (c2 < N) ? (uint8_t)filter_data[Offset(filter_shape, c2, filter_y, filter_x, in_channel)] : 0;
-      const uint8_t b0 = (c3 < N) ? (uint8_t)filter_data[Offset(filter_shape, c3, filter_y, filter_x, in_channel)] : 0;
-
-      m_kernel_packed[k][ng] = pack4_u8(b3,b2,b1,b0);
-    }
-  }
-
   // Shape of matrices:
   // m_im2col_packed: [K][M/4]
   // m_kernel_packed: [K][N/4]
@@ -164,6 +140,11 @@ inline void ConvPerChannel(
     }
   }
 
+  // Assume weights are always packed
+  const uint32_t* packed_weights_ptr = reinterpret_cast<const uint32_t*>(filter_data);
+  const int output_depth_div_4 = (output_depth + 3) / 4; // Use ceiling division for safety if padding logic in pack_weights is correct
+  const int N4 = output_depth_div_4;
+
   for (int krnl_y = 0; krnl_y < kernel_rows; krnl_y += TILE_K) {
     const int kk = std::min(TILE_K, kernel_rows - krnl_y);
     const int ky = krnl_y + kk;
@@ -177,7 +158,7 @@ inline void ConvPerChannel(
       for (int ng = krnl_x/4; ng < (krnl_x + TILE_N)/4; ++ng) {
         if (ng >= N4) break; // Boundary check
         for (int k = krnl_y; k < ky; ++k) {
-           cfu_op0(4, 0, m_kernel_packed[k][ng]);
+           cfu_op0(4, 0, packed_weights_ptr[k * output_depth_div_4 + ng]);
         }
       }
       
@@ -233,7 +214,6 @@ inline void ConvPerChannel(
       }
     }
   }
-
   perf_disable_counter(6);
 }
 
