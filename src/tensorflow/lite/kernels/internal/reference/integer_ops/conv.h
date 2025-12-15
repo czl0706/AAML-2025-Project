@@ -89,6 +89,7 @@ inline void ConvPerChannel(
     const int filter_y = rem / filter_width;
     const int filter_x = rem - filter_y * filter_width;
 
+    #pragma GCC unroll 4
     for (int mg = 0; mg < M4; ++mg) {
       const int r0 = mg*4 + 0;
       const int r1 = mg*4 + 1;
@@ -96,7 +97,7 @@ inline void ConvPerChannel(
       const int r3 = mg*4 + 3;
 
       auto load_row = [&](int r)->uint8_t {
-        if (r >= M) return 0; // M padding：GEMM padding 用 0
+        if (r >= M) [[unlikely]] return 0; // M padding：GEMM padding 用 0
         const int out_y = r / output_width;
         const int out_x = r - out_y * output_width;
 
@@ -110,7 +111,7 @@ inline void ConvPerChannel(
           ((uint32_t)in_x < (uint32_t)input_width) &&
           ((uint32_t)in_y < (uint32_t)input_height);
 
-        if (!inside) return (uint8_t)neg_in_off;                      // 影像邊界 padding：neg_in_off
+        if (!inside) [[unlikely]] return (uint8_t)neg_in_off;                      // 影像邊界 padding：neg_in_off
         return (uint8_t)input_data[Offset(input_shape, 0, in_y, in_x, in_channel)];
       };
 
@@ -156,6 +157,7 @@ inline void ConvPerChannel(
 
       // Load matrix B (kernel tiles) into CFU
       cfu_op0(2, 0, 0);
+      #pragma GCC unroll 4
       for (int ng = krnl_x/4; ng < (krnl_x + TILE_N)/4; ++ng) {
         if (ng >= N4) break; // Boundary check
         for (int k = krnl_y; k < ky; ++k) {
@@ -171,6 +173,7 @@ inline void ConvPerChannel(
 
         // Load matrix A (im2col tiles) into CFU
         cfu_op0(2, 0, 0);
+        #pragma GCC unroll 4
         for (int mg = img_y/4; mg < (img_y + TILE_M)/4; ++mg) {
           if (mg >= M4) break; // Boundary check
           for (int k = krnl_y; k < ky; ++k) {
