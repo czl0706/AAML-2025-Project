@@ -40,8 +40,7 @@ constexpr int kMaxIm2ColRows4 = (kMaxIm2ColRows + 3) / 4;
 constexpr int kMaxOutputDepth4 = (kMaxOutputDepth + 3) / 4;
 
 // Packed buffers: [M/4][K] and [K][N/4] (Note: weights are [N/4][K] in packed file)
-static uint32_t m_im2col_packed[kMaxIm2ColRows4][kMaxIm2ColCols];
-// static uint32_t m_kernel_packed[kMaxIm2ColCols][kMaxOutputDepth4];
+alignas(64) static uint32_t m_im2col_packed[kMaxIm2ColRows4][kMaxIm2ColCols];
 static int32_t mm_result[kMaxIm2ColRows][kMaxOutputDepth];
 
 // Fixed-point per-channel-quantization convolution reference kernel.
@@ -52,7 +51,6 @@ inline void ConvPerChannel(
     const int8_t* filter_data, const RuntimeShape& bias_shape,
     const int32_t* bias_data, const RuntimeShape& output_shape,
     int8_t* output_data) {
-  perf_enable_counter(6);
   // Get parameters.
   const int32_t input_offset = params.input_offset;  // r = s(q - Z)
   const int stride_width = params.stride_width;
@@ -81,7 +79,10 @@ inline void ConvPerChannel(
   const int K = filter_height * filter_width * filter_input_depth;    // kernel_rows
   const int img_off = filter_height * filter_width;
   const int M4 = (M + 3) >> 2;
+  const int N  = output_depth;
+  const int N4 = (N + 3) >> 2;
 
+  perf_enable_counter(3);
   for (int k = 0; k < K; ++k) {
     // k -> (in_channel, filter_y, filter_x)
     const int in_channel = k / img_off;
@@ -91,17 +92,18 @@ inline void ConvPerChannel(
 
     #pragma GCC unroll 4
     for (int mg = 0; mg < M4; ++mg) {
-      const int r0 = mg*4 + 0;
-      const int r1 = mg*4 + 1;
-      const int r2 = mg*4 + 2;
-      const int r3 = mg*4 + 3;
+      const int r0 = (mg << 2) + 0;
+      const int r1 = (mg << 2) + 1;
+      const int r2 = (mg << 2) + 2;
+      const int r3 = (mg << 2) + 3;
 
       auto load_row = [&](int r)->uint8_t {
-        if (r >= M) [[unlikely]] return 0; // M padding：GEMM padding 用 0
+        if (r >= M) [[unlikely]] return 0;  // GEMM tail padding -> 0
+
         const int out_y = r / output_width;
         const int out_x = r - out_y * output_width;
 
-        const int in_y_origin = out_y - pad_height;                   // 你現在 height stride=1 的寫法
+        const int in_y_origin = out_y - pad_height;
         const int in_x_origin = (out_x * stride_width) - pad_width;
 
         const int in_y = in_y_origin + filter_y;
@@ -111,7 +113,7 @@ inline void ConvPerChannel(
           ((uint32_t)in_x < (uint32_t)input_width) &&
           ((uint32_t)in_y < (uint32_t)input_height);
 
-        if (!inside) [[unlikely]] return (uint8_t)neg_in_off;                      // 影像邊界 padding：neg_in_off
+        if (!inside) [[unlikely]] return (uint8_t)neg_in_off; // image padding -> neg_in_off
         return (uint8_t)input_data[Offset(input_shape, 0, in_y, in_x, in_channel)];
       };
 
@@ -124,6 +126,7 @@ inline void ConvPerChannel(
       m_im2col_packed[mg][k] = pack4_u8(a3,a2,a1,a0);
     }
   }
+  perf_disable_counter(3);
 
   // Shape of matrices:
   // m_im2col_packed: [M/4][K]
@@ -133,94 +136,94 @@ inline void ConvPerChannel(
   const int TILE_K = 256; // kernel_rows
   const int TILE_N = 256; // output_depth
 
-  const int im2col_rows = M;
-  const int kernel_rows = K;
-
-  for (int row = 0; row < im2col_rows; ++row) {
-    for (int col = 0; col < output_depth; ++col) {
+  for (int row = 0; row < M; ++row) {
+    for (int col = 0; col < N; ++col) {
       mm_result[row][col] = 0;
     }
   }
 
   // Assume weights are always packed
-  const uint32_t* packed_weights_ptr = reinterpret_cast<const uint32_t*>(filter_data);
-  const int output_depth_div_4 = (output_depth + 3) / 4; // Use ceiling division for safety if padding logic in pack_weights is correct
-  const int N4 = output_depth_div_4;
+  const uint32_t* __restrict__ packed_weights_ptr = reinterpret_cast<const uint32_t*>(filter_data);
 
-  for (int krnl_y = 0; krnl_y < kernel_rows; krnl_y += TILE_K) {
-    const int kk = std::min(TILE_K, kernel_rows - krnl_y);
+  perf_enable_counter(4);
+  for (int krnl_y = 0; krnl_y < K; krnl_y += TILE_K) {
+    const int kk = std::min(TILE_K, K - krnl_y);
     const int ky = krnl_y + kk;
 
-    for (int krnl_x = 0; krnl_x < output_depth; krnl_x += TILE_N) {
-      const int nn = std::min(TILE_N, output_depth - krnl_x);
+    for (int krnl_x = 0; krnl_x < N; krnl_x += TILE_N) {
+      const int nn = std::min(TILE_N, N - krnl_x);
       const int kx = krnl_x + nn;
 
-      // Load matrix B (kernel tiles) into CFU
+      // ---- compute ng range exactly (no break in loop)
+      const int ng0 = (krnl_x >> 2);
+      const int ng1 = std::min(N4, (kx + 3) >> 2);
+
+      // Load B tile into CFU (order unchanged: ng outer, k inner)
       cfu_op0(2, 0, 0);
-      #pragma GCC unroll 4
-      for (int ng = krnl_x/4; ng < (krnl_x + TILE_N)/4; ++ng) {
-        if (ng >= N4) break; // Boundary check
+      for (int ng = ng0; ng < ng1; ++ng) {
+        const int base = ng * K;
+        #pragma GCC unroll 4
         for (int k = krnl_y; k < ky; ++k) {
-           // Weights are [N/4][K] -> [ng][k]
-           cfu_op0(4, 0, packed_weights_ptr[ng * kernel_rows + k]);
+          cfu_op0(4, 0, packed_weights_ptr[base + k]); // [ng][k]
         }
       }
       
       const int img_y = 0;
-      // for (int img_y = 0; img_y < im2col_rows; img_y += TILE_M) {
-        const int mm = std::min(TILE_M, im2col_rows - img_y);
-        const int my = img_y + mm;
+      const int mm = std::min(TILE_M, M - img_y);
+      const int my = img_y + mm;
+      const int mg0 = (img_y >> 2);
+      const int mg1 = std::min(M4, (my + 3) >> 2); // ceil(my/4)
 
-        // Load matrix A (im2col tiles) into CFU
-        cfu_op0(2, 0, 0);
+      // Load A tile into CFU (order unchanged: mg outer, k inner)
+      cfu_op0(2, 0, 0);
+      for (int mg = mg0; mg < mg1; ++mg) {
         #pragma GCC unroll 4
-        for (int mg = img_y/4; mg < (img_y + TILE_M)/4; ++mg) {
-          if (mg >= M4) break; // Boundary check
-          for (int k = krnl_y; k < ky; ++k) {
-            // im2col is [M/4][K] -> [mg][k]
-            cfu_op0(3, 0, m_im2col_packed[mg][k]);
-          }
+        for (int k = krnl_y; k < ky; ++k) {
+          cfu_op0(3, 0, m_im2col_packed[mg][k]); // [mg][k]
         }
+      }
 
-        // Configure and start CFU matmul
-        cfu_op0(1, input_offset, mm << 20 | kk << 10 | nn);
-        while (cfu_op0(0, 0, 0)) { }
+      // Start CFU matmul
+      cfu_op0(1, input_offset, (mm << 20) | (kk << 10) | nn);
+      while (cfu_op0(0, 0, 0)) { }
 
-        // Reset address generator
-        // User requested: send krnl_x, img_y, mm
-        cfu_op0(6, (krnl_x << 16) | img_y, mm);
+      // Reset address generator
+      cfu_op0(6, (krnl_x << 16) | img_y, mm);
 
-        // Read results using CFU address generation
-        for (int row = img_y; row < my; ++row) {
-          for (int col = krnl_x; col < kx; col += 4) {
-            mm_result[row][col + 0] += cfu_op0(5, 0, 0);
-            mm_result[row][col + 1] += cfu_op0(5, 0, 1);
-            mm_result[row][col + 2] += cfu_op0(5, 0, 2);
-            mm_result[row][col + 3] += cfu_op0(5, 0, 3); // Increments address
-          }
+      // Read results
+      for (int row = img_y; row < my; ++row) {
+        #pragma GCC unroll 4
+        for (int col = krnl_x; col < kx; col += 4) {
+          mm_result[row][col + 0] += cfu_op0(5, 0, 0);
+          mm_result[row][col + 1] += cfu_op0(5, 0, 1);
+          mm_result[row][col + 2] += cfu_op0(5, 0, 2);
+          mm_result[row][col + 3] += cfu_op0(5, 0, 3);
         }
-      // }
-    }
-  }
-
-  for (int out_y = 0; out_y < output_height; ++out_y) {
-    for (int out_x = 0; out_x < output_width; ++out_x) {
-      const int row = out_y * output_width + out_x;
-      for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
-        int32_t acc = mm_result[row][out_channel] + bias_data[out_channel];
-
-          acc = MultiplyByQuantizedMultiplier(
-              acc, output_multiplier[out_channel], output_shift[out_channel]);
-          acc += output_offset;
-          acc = std::max(acc, output_activation_min);
-          acc = std::min(acc, output_activation_max);
-
-        output_data[Offset(output_shape, 0, out_y, out_x, out_channel)] =
-              static_cast<int8_t>(acc);
       }
     }
   }
-  perf_disable_counter(6);
+  perf_disable_counter(4);
+
+  // ----------------------------
+  // Requantize + clamp
+  // ----------------------------
+  perf_enable_counter(5);
+  for (int out_x = 0; out_x < output_width; ++out_x) {
+    const int row = out_x; // out_y=0, output_height=1
+    for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
+      int32_t acc = mm_result[row][out_channel] + bias_data[out_channel];
+
+      acc = MultiplyByQuantizedMultiplier(
+          acc, output_multiplier[out_channel], output_shift[out_channel]);
+      acc += output_offset;
+      acc = std::max(acc, output_activation_min);
+      acc = std::min(acc, output_activation_max);
+
+      output_data[Offset(output_shape, 0, 0, out_x, out_channel)] =
+              static_cast<int8_t>(acc);
+    }
+  }
+  perf_disable_counter(5);
 }
 
 inline void ConvPerChannelWithPackedInt4Weights(

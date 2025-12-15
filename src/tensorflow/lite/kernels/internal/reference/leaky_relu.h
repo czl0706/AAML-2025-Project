@@ -19,6 +19,7 @@ limitations under the License.
 #include <limits>
 
 #include "tensorflow/lite/kernels/internal/common.h"
+#include "perf.h"
 
 namespace tflite {
 namespace reference_ops {
@@ -40,6 +41,7 @@ inline void QuantizeLeakyRelu(const LeakyReluParams& params,
                               const T* input_data,
                               const RuntimeShape& output_shape,
                               T* output_data) {
+  perf_enable_counter(6);
   const int flat_size = MatchingFlatSize(input_shape, output_shape);
   static const int32_t quantized_min = std::numeric_limits<T>::min();
   static const int32_t quantized_max = std::numeric_limits<T>::max();
@@ -61,6 +63,7 @@ inline void QuantizeLeakyRelu(const LeakyReluParams& params,
         std::min(quantized_max, std::max(quantized_min, unclamped_output));
     output_data[i] = static_cast<T>(clamped_output);
   }
+  perf_disable_counter(6);
 }
 
 }  // namespace reference_ops
