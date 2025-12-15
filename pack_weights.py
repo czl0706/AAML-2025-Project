@@ -68,8 +68,18 @@ def pack_weights(input_path, output_path):
                 flat_weights = np.concatenate((flat_weights, padding), axis=1)
                 N = N + pad_len
             
+            # Reshape to [K, N/4, 4]
             packed_weights = flat_weights.reshape((K, N // 4, 4))
+            
+            # Reverse the last dimension (c0, c1, c2, c3 -> c3, c2, c1, c0)
             packed_weights = packed_weights[:, :, ::-1]
+            
+            # Transpose to [N/4, K, 4] to optimize memory access pattern
+            # Old: [K, N/4, 4] -> Access [k][n]
+            # New: [N/4, K, 4] -> Access [n][k]
+            packed_weights = packed_weights.transpose((1, 0, 2))
+            
+            # Flatten back to bytes
             new_data = packed_weights.flatten().tobytes()
             
             # We need to find the offset of the OLD data to verify we are replacing the right thing

@@ -39,8 +39,8 @@ constexpr int kMaxOutputDepth = 2000;
 constexpr int kMaxIm2ColRows4 = (kMaxIm2ColRows + 3) / 4;
 constexpr int kMaxOutputDepth4 = (kMaxOutputDepth + 3) / 4;
 
-// Packed buffers: [K][M/4] and [K][N/4]
-static uint32_t m_im2col_packed[kMaxIm2ColCols][kMaxIm2ColRows4];
+// Packed buffers: [M/4][K] and [K][N/4] (Note: weights are [N/4][K] in packed file)
+static uint32_t m_im2col_packed[kMaxIm2ColRows4][kMaxIm2ColCols];
 // static uint32_t m_kernel_packed[kMaxIm2ColCols][kMaxOutputDepth4];
 static int32_t mm_result[kMaxIm2ColRows][kMaxOutputDepth];
 
@@ -119,13 +119,14 @@ inline void ConvPerChannel(
       const uint8_t a1 = load_row(r2);
       const uint8_t a0 = load_row(r3);
 
-      m_im2col_packed[k][mg] = pack4_u8(a3,a2,a1,a0);
+      // Transposed packing: [mg][k]
+      m_im2col_packed[mg][k] = pack4_u8(a3,a2,a1,a0);
     }
   }
 
   // Shape of matrices:
-  // m_im2col_packed: [K][M/4]
-  // m_kernel_packed: [K][N/4]
+  // m_im2col_packed: [M/4][K]
+  // packed_weights:  [N/4][K]
   // mm_result:       [M][N]
   const int TILE_M = 148; // im2col_rows
   const int TILE_K = 256; // kernel_rows
@@ -158,7 +159,8 @@ inline void ConvPerChannel(
       for (int ng = krnl_x/4; ng < (krnl_x + TILE_N)/4; ++ng) {
         if (ng >= N4) break; // Boundary check
         for (int k = krnl_y; k < ky; ++k) {
-           cfu_op0(4, 0, packed_weights_ptr[k * output_depth_div_4 + ng]);
+           // Weights are [N/4][K] -> [ng][k]
+           cfu_op0(4, 0, packed_weights_ptr[ng * kernel_rows + k]);
         }
       }
       
@@ -172,7 +174,8 @@ inline void ConvPerChannel(
         for (int mg = img_y/4; mg < (img_y + TILE_M)/4; ++mg) {
           if (mg >= M4) break; // Boundary check
           for (int k = krnl_y; k < ky; ++k) {
-            cfu_op0(3, 0, m_im2col_packed[k][mg]);
+            // im2col is [M/4][K] -> [mg][k]
+            cfu_op0(3, 0, m_im2col_packed[mg][k]);
           }
         }
 
