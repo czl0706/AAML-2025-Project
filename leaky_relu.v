@@ -17,7 +17,7 @@ module leaky_relu (
     output reg signed [7:0] output_val
 );
 
-// 1. Calculate input_value and select parameters based on input sign
+// Stage 1: Calculate input_value and select parameters based on input sign
 reg signed [31:0] input_value;
 reg signed [31:0] multiplier;
 reg signed [31:0] shift;
@@ -33,44 +33,39 @@ always @(*) begin
     end
 end
 
-reg signed [31:0] input_value_q;
-reg signed [31:0] multiplier_q;
+reg signed [63:0] prod_q;
 reg signed [31:0] shift_q;
 reg valid_q1;
 
 always @(posedge clk) begin
     if (rst) begin  
         valid_q1      <= 1'b0;
-        input_value_q <= 32'd0;
-        multiplier_q  <= 32'd0;
+        // input_value_q <= 32'd0;
+        // multiplier_q  <= 32'd0;
+        prod_q        <= 64'd0;
         shift_q       <= 32'd0;
     end else begin
         valid_q1      <= in_valid;
-        input_value_q <= input_value;
-        multiplier_q  <= multiplier;
+        // input_value_q <= input_value;
+        // multiplier_q  <= multiplier;
+        prod_q        <= $signed(input_value) * $signed(multiplier);
         shift_q       <= shift;
     end
 end
 
-// 2. CustomMultiplyByQuantizedMultiplier Logic
-// int total_shift = 31 - shift;
-// int64_t prod = (int64_t)x * (int64_t)m;
-
-reg signed [63:0] prod;
+// Stage 2: MultiplyByQuantizedMultiplier Logic
 reg signed [31:0] total_shift;
 reg signed [63:0] round;
 reg signed [63:0] shifted_prod;
 
 always @(*) begin
-    prod = $signed(input_value_q) * $signed(multiplier_q);
     total_shift = 31 - shift_q;
     round = 64'd1 << (total_shift - 1);
 
     if (total_shift > 0) begin    
-        shifted_prod = (prod + round) >>> total_shift;
+        shifted_prod = (prod_q + round) >>> total_shift;
     end else begin
-        // total_shift <= 0 -> left shift
-        shifted_prod = prod << (-total_shift);
+        shifted_prod = prod_q << (-total_shift);
     end
 end
 
@@ -90,8 +85,7 @@ always @(posedge clk) begin
     end
 end
 
-// 3. Add output_offset and clamp to [-128, 127]
-
+// Stage 3: Add output_offset and clamp to [-128, 127]
 reg signed [31:0] unclamped_output;
 reg signed [7:0] out;
 

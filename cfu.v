@@ -36,19 +36,34 @@ assign rsp_valid = cmd_valid;
 assign cmd_ready = rsp_ready;
 
 wire [6:0] funct7 = cmd_payload_function_id[9:3];
+////////// TPU //////////
 // Mode 0: Get TPU busy status
 // Mode 1: Set K, M, N and start computation
-// Mode 2: Not used
+// Mode 2: Reset write_index
 // Mode 3: Write A buffer
 // Mode 4: Write B buffer
 // Mode 5: Read C buffer
+// Mode 6: Reset read_index
+
+////////// LReLU //////////
+// Mode 10: Set Leaky ReLU input/output offset
+// Mode 11: Set Leaky ReLU alpha multiplier/shift
+// Mode 12: Set Leaky ReLU identity multiplier/shift
+// Mode 13: Push Leaky ReLU input (8 values)
+// Mode 14: Read Leaky ReLU output (packed)
+
+////////// OC quantize //////////
+// Mode 20: Reset / Set Output Offset for Quantization
+// Mode 21: Load Quantization Parameters (Bias, Shift, Multiplier)
+// Mode 22: Push Input (Accumulator) to oc_quantize
+// Mode 23: Read Packed Quantization Output
 
 always @(*) begin
     rsp_payload_outputs_0 = 0;
     if (cmd_valid) begin
         case (funct7)
-            0: rsp_payload_outputs_0 = busy_TPU;
-            5: rsp_payload_outputs_0 = cmd_payload_inputs_1 == 3 ? C_data_out[ 31: 0] :
+             0: rsp_payload_outputs_0 = busy_TPU;
+             5: rsp_payload_outputs_0 = cmd_payload_inputs_1 == 3 ? C_data_out[ 31: 0] :
                                        cmd_payload_inputs_1 == 2 ? C_data_out[ 63:32] :
                                        cmd_payload_inputs_1 == 1 ? C_data_out[ 95:64] :
                                        cmd_payload_inputs_1 == 0 ? C_data_out[127:96] : 32'b0;
@@ -105,6 +120,7 @@ wire [63:0] lrelu_bram_data_out;
 wire [ 9:0] Nb_M = M[9:2] + |M[1:0];
 wire [13:0] stride_col = {4'b0, Nb_M, 2'b00};
 
+// TPU control signal
 always @(posedge clk) begin
     if (cmd_valid && funct7 == 1) begin
         M <= cmd_payload_inputs_1[29:20];
@@ -116,58 +132,6 @@ always @(posedge clk) begin
     end
     else begin
         in_valid <= 1'b0;
-    end
-
-    // LReLU Logic
-    if (reset) begin
-        lrelu_input_offset               <= 32'd0;
-        lrelu_output_offset              <= 32'd0;
-        lrelu_output_multiplier_alpha    <= 32'd0;
-        lrelu_output_shift_alpha         <= 32'd0;
-        lrelu_output_multiplier_identity <= 32'd0;
-        lrelu_output_shift_identity      <= 32'd0;
-
-        lrelu_input_val[0] <= 8'd0;
-        lrelu_input_val[1] <= 8'd0;
-        lrelu_input_val[2] <= 8'd0;
-        lrelu_input_val[3] <= 8'd0;
-        lrelu_input_val[4] <= 8'd0;
-        lrelu_input_val[5] <= 8'd0;
-        lrelu_input_val[6] <= 8'd0;
-        lrelu_input_val[7] <= 8'd0;
-        lrelu_in_valid     <= 1'b0;
-        lrelu_seq_num      <= 0;
-    end else begin
-        lrelu_in_valid <= 0;
-        if (cmd_valid) begin
-            case (funct7)
-                14: begin
-                    lrelu_seq_num <= 0;
-                end
-                10: begin
-                    lrelu_seq_num       <= 0;
-                    lrelu_input_offset  <= cmd_payload_inputs_0;
-                    lrelu_output_offset <= cmd_payload_inputs_1;                
-                end
-                11: begin
-                    lrelu_output_multiplier_alpha <= cmd_payload_inputs_0;
-                    lrelu_output_shift_alpha      <= cmd_payload_inputs_1;
-                end
-                12: begin
-                    lrelu_output_multiplier_identity <= cmd_payload_inputs_0;
-                    lrelu_output_shift_identity      <= cmd_payload_inputs_1;
-                end
-                13: begin
-                    lrelu_in_valid <= 1;
-                    {lrelu_input_val[3], lrelu_input_val[2], lrelu_input_val[1], lrelu_input_val[0]} <= cmd_payload_inputs_0;
-                    {lrelu_input_val[7], lrelu_input_val[6], lrelu_input_val[5], lrelu_input_val[4]} <= cmd_payload_inputs_1;
-                end
-            endcase
-        end
-
-        if (lrelu_out_valid[0]) begin
-            lrelu_seq_num <= lrelu_seq_num + 1;
-        end
     end
 
     if (cmd_valid && funct7 == 2) begin
@@ -196,13 +160,45 @@ always @(posedge clk) begin
             read_index <= read_index + stride_col;
         end
     end
+end
 
-    // Quantization Logic
-    if (reset) begin
-        oc_param_ptr <= 0;
-        oc_result_read_ptr <= 0;
-        oc_output_offset <= 0;
-    end else if (cmd_valid) begin
+// LReLU control signal
+always @(posedge clk) begin
+    lrelu_in_valid <= 0;
+    if (cmd_valid) begin
+        case (funct7)
+            14: begin
+                lrelu_seq_num <= 0;
+            end
+            10: begin
+                lrelu_seq_num       <= 0;
+                lrelu_input_offset  <= cmd_payload_inputs_0;
+                lrelu_output_offset <= cmd_payload_inputs_1;                
+            end
+            11: begin
+                lrelu_output_multiplier_alpha <= cmd_payload_inputs_0;
+                lrelu_output_shift_alpha      <= cmd_payload_inputs_1;
+            end
+            12: begin
+                lrelu_output_multiplier_identity <= cmd_payload_inputs_0;
+                lrelu_output_shift_identity      <= cmd_payload_inputs_1;
+            end
+            13: begin
+                lrelu_in_valid <= 1;
+                {lrelu_input_val[3], lrelu_input_val[2], lrelu_input_val[1], lrelu_input_val[0]} <= cmd_payload_inputs_0;
+                {lrelu_input_val[7], lrelu_input_val[6], lrelu_input_val[5], lrelu_input_val[4]} <= cmd_payload_inputs_1;
+            end
+        endcase
+    end
+
+    if (lrelu_out_valid[0]) begin
+        lrelu_seq_num <= lrelu_seq_num + 1;
+    end
+end
+
+// Output channels quantization control signal
+always @(posedge clk) begin
+    if (cmd_valid) begin
         case (funct7)
             20: begin // Reset / Set Offset
                 if (cmd_payload_inputs_0 == 1) begin
@@ -231,7 +227,7 @@ end
 
 // Quantization State
 reg [31:0] oc_output_offset;
-reg [63:0] oc_params [0:255]; // {multiplier(32), bias(16), shift(16)}
+reg [63:0] oc_params [0:255]; // BRAM Layout: {multiplier(32), bias(16), shift(16)}
 reg [7:0] oc_results [0:255]; // Multi-bank BRAM
 reg [8:0] oc_param_ptr;
 reg [8:0] oc_result_read_ptr;
@@ -250,18 +246,18 @@ wire signed [7:0] oc_output_val;
 wire [7:0] oc_out_index;
 
 oc_quantize u_oc_quantize (
-    .clk(clk),
-    .rst(reset),
-    .in_valid(cmd_valid && funct7 == 22),
-    .input_val(cmd_payload_inputs_1),
-    .in_index(oc_op22_index),
-    .bias(oc_op22_bias),
-    .output_offset(oc_output_offset),
+    .clk              (clk),
+    .rst              (reset),
+    .in_valid         (cmd_valid && funct7 == 22),
+    .input_val        (cmd_payload_inputs_1),
+    .in_index         (oc_op22_index),
+    .bias             (oc_op22_bias),
+    .output_offset    (oc_output_offset),
     .output_multiplier(oc_op22_mult),
-    .output_shift(oc_op22_shift),
-    .out_valid(oc_out_valid),
-    .output_val(oc_output_val),
-    .out_index(oc_out_index)
+    .output_shift     (oc_op22_shift),
+    .out_valid        (oc_out_valid),
+    .output_val       (oc_output_val),
+    .out_index        (oc_out_index)
 );
 
 wire [31:0] packed_oc_results = {
@@ -273,8 +269,8 @@ wire [31:0] packed_oc_results = {
 
 wire         busy_TPU;
 
-wire [31:0]  A_data_out_TPU = A_data_out;
-wire [31:0]  B_data_out_TPU = B_data_out;
+wire [ 31:0] A_data_out_TPU = A_data_out;
+wire [ 31:0] B_data_out_TPU = B_data_out;
 wire [127:0] C_data_out_TPU = C_data_out;
 
 wire [15:0]  A_index_TPU; 
@@ -373,7 +369,8 @@ gbuff_LReLU (
     .ram_en  (1'b1      ),
     .wr_en   (lrelu_out_valid[0] ),
     .index   ((cmd_valid && funct7 == 14) ? cmd_payload_inputs_1[31:1] : lrelu_seq_num),
-    .data_in ({lrelu_output_val[7], lrelu_output_val[6], lrelu_output_val[5], lrelu_output_val[4], lrelu_output_val[3], lrelu_output_val[2], lrelu_output_val[1], lrelu_output_val[0]}),
+    .data_in ({lrelu_output_val[7], lrelu_output_val[6], lrelu_output_val[5], lrelu_output_val[4], 
+               lrelu_output_val[3], lrelu_output_val[2], lrelu_output_val[1], lrelu_output_val[0]}),
     .data_out(lrelu_bram_data_out)
 );
 

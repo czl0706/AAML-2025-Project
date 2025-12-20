@@ -16,7 +16,7 @@ module oc_quantize (
     output reg [7:0] out_index
 );
 
-// Stage 0: Input Register (Align with BRAM latency)
+// Stage 1: Input Register (Align with BRAM latency)
 reg signed [31:0] input_val_q0;
 reg signed [31:0] bias_q0;
 reg signed [31:0] output_offset_q0;
@@ -45,7 +45,7 @@ always @(posedge clk) begin
     end
 end
 
-// Stage 1: Add bias
+// Stage 2: Add bias
 reg signed [63:0] prod_q1;
 reg valid_q1;
 reg [7:0] index_q1;
@@ -68,7 +68,7 @@ always @(posedge clk) begin
     end
 end
 
-// Stage 2: MultiplyByQuantizedMultiplier
+// Stage 3: MultiplyByQuantizedMultiplier
 reg signed [63:0] round;
 reg signed [63:0] shifted_prod;
 
@@ -101,7 +101,7 @@ always @(posedge clk) begin
     end
 end
 
-// Stage 3: Add offset and clamp
+// Stage 4: Add offset and clamp
 reg signed [31:0] unclamped_output;
 reg signed [7:0] out;
 
