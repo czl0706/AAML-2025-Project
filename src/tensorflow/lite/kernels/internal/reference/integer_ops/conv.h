@@ -181,8 +181,8 @@ inline void ConvPerChannel(
   const int32_t output_offset = params.output_offset;
 
   // Set min and max value of the output.
-  const int32_t output_activation_min = -128;
-  const int32_t output_activation_max =  127;
+  // const int32_t output_activation_min = -128;
+  // const int32_t output_activation_max =  127;
 
   const int output_depth = MatchingDim(filter_shape, 0, output_shape, 3);
 
@@ -418,41 +418,70 @@ inline void ConvPerChannel(
   // ----------------------------
   // Requantize + clamp
   // ----------------------------
+
   perf_enable_counter(5);
-  for (int out_x = 0; out_x < output_width; ++out_x) {
-    const int row = out_x; // out_y=0, output_height=1
-    for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
-      int32_t acc = mm_result[row][out_channel] + bias_data[out_channel];
+  constexpr int CHUNK = 256;
 
-      acc = MultiplyByQuantizedMultiplier(
-          acc, output_multiplier[out_channel], output_shift[out_channel]);
-      acc += output_offset;
-      acc = std::max(acc, output_activation_min);
-      acc = std::min(acc, output_activation_max);
+  for (int base = 0; base < output_depth; base += CHUNK) {
+    const int chunk_size = std::min(CHUNK, output_depth - base);
+    const int padded_chunk_size = std::max(72, (chunk_size + 3) & ~3);
 
-      output_data[Offset(output_shape, 0, 0, out_x, out_channel)] =
-              static_cast<int8_t>(acc);
+    // 1) Reset CFU and set offset
+    cfu_op0(20, 1, output_offset);
+
+    // 2) Load Params (branchless: two-phase)
+    for (int j = 0; j < chunk_size; ++j) {
+      const int ch = base + j;
+      const uint32_t args_in0 =
+          (uint32_t(uint16_t(bias_data[ch])) << 16) |
+          uint32_t(uint16_t(output_shift[ch]));
+      const uint32_t args_in1 = uint32_t(output_multiplier[ch]);
+      cfu_op0(21, args_in0, args_in1);
+    }
+    for (int j = chunk_size; j < padded_chunk_size; ++j) {
+      cfu_op0(21, 0, 0);
+    }
+
+    // 3) Process Pixels
+    for (int out_x = 0; out_x < output_width; ++out_x) {
+      const int row = out_x;
+
+      // Push Accumulators (branchless: two-phase)
+      const int32_t* accp = &mm_result[row][base];
+      for (int j = 0; j < chunk_size; ++j) {
+        cfu_op0(22, j, accp[j]);
+      }
+      for (int j = chunk_size; j < padded_chunk_size; ++j) {
+        cfu_op0(22, j, 0);
+      }
+
+      // Read Results
+      int8_t* outp = output_data + out_x * output_depth + base;  // NHWC fast offset
+
+      cfu_op0(20, 0, 0);  // Reset read ptr
+
+      // full groups (always safe to store 4 bytes inside padded space,
+      // but output buffer only has chunk_size valid -> handle tail once)
+      int j = 0;
+      for (; j + 3 < chunk_size; j += 4) {
+        const uint32_t packed = cfu_op0(23, 0, 0);
+        outp[j + 0] = int8_t(uint8_t(packed >>  0));
+        outp[j + 1] = int8_t(uint8_t(packed >>  8));
+        outp[j + 2] = int8_t(uint8_t(packed >> 16));
+        outp[j + 3] = int8_t(uint8_t(packed >> 24));
+      }
+
+      // tail (最多剩 1~3 bytes)
+      if (j < chunk_size) {
+        const uint32_t packed = cfu_op0(23, 0, 0);
+        if (j + 0 < chunk_size) outp[j + 0] = int8_t(uint8_t(packed >>  0));
+        if (j + 1 < chunk_size) outp[j + 1] = int8_t(uint8_t(packed >>  8));
+        if (j + 2 < chunk_size) outp[j + 2] = int8_t(uint8_t(packed >> 16));
+        // (j+3) 不會需要，因為 j+3 < chunk_size 時已經在 full loop 處理
+      }
     }
   }
   perf_disable_counter(5);
-
-
-  // perf_enable_counter(5);
-  // cfu_op0(20, 0, 0); // reset R/W index for quantizer
-  // for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
-  //   int16_t trunc_shift = static_cast<int16_t>(output_shift[out_channel]);
-  //   int16_t trunc_bias = static_cast<int16_t>(bias_data[out_channel]);
-  //   cfu_op0(21, output_multiplier[out_channel], trunc_shift << 16 | trunc_bias); // packed as 64-bit word and send to quantizer bram
-  // }
-
-  // cfu_op0(20, 0, output_offset); // reset R/W index for quantizer and set output offset
-  // for (int out_x = 0; out_x < output_width; ++out_x) {
-  //   const int row = out_x; // out_y=0, output_height=1
-  //   for (int out_channel = 0; out_channel < output_depth; ++out_channel) {
-  //     output_data[Offset(output_shape, 0, 0, out_x, out_channel)] = cfu_op0(22, out_channel, mm_result[row][out_channel]);
-  //   }
-  // }
-  // perf_disable_counter(5);
 }
 
 inline void ConvPerChannelWithPackedInt4Weights(

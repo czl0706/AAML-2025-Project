@@ -16,6 +16,7 @@
 `include "TPU.v"
 `include "global_buffer_bram.v"
 `include "leaky_relu.v"
+`include "oc_quantize.v"
 
 module Cfu (
     input               cmd_valid,
@@ -52,6 +53,7 @@ always @(*) begin
                                        cmd_payload_inputs_1 == 1 ? C_data_out[ 95:64] :
                                        cmd_payload_inputs_1 == 0 ? C_data_out[127:96] : 32'b0;
             14: rsp_payload_outputs_0 = cmd_payload_inputs_1[0] ? lrelu_bram_data_out[63:32] : lrelu_bram_data_out[31:0];
+            23: rsp_payload_outputs_0 = packed_oc_results;
         endcase
     end 
 end
@@ -174,6 +176,7 @@ always @(posedge clk) begin
         write_index <= write_index + 1;
     end
 
+
     // Reset read_index (funct7=6)
     if (cmd_valid && funct7 == 6) begin
         read_index <= 0;
@@ -193,7 +196,80 @@ always @(posedge clk) begin
             read_index <= read_index + stride_col;
         end
     end
+
+    // Quantization Logic
+    if (reset) begin
+        oc_param_ptr <= 0;
+        oc_result_read_ptr <= 0;
+        oc_output_offset <= 0;
+    end else if (cmd_valid) begin
+        case (funct7)
+            20: begin // Reset / Set Offset
+                if (cmd_payload_inputs_0 == 1) begin
+                    oc_param_ptr <= 0;
+                    oc_result_read_ptr <= 0;
+                    oc_output_offset <= cmd_payload_inputs_1;
+                end else begin
+                    oc_result_read_ptr <= 0;
+                end
+            end
+            21: begin // Load Param
+                oc_params[oc_param_ptr] <= {cmd_payload_inputs_1, cmd_payload_inputs_0};
+                oc_param_ptr <= oc_param_ptr + 1;
+            end
+            23: begin // Read Output
+                oc_result_read_ptr <= oc_result_read_ptr + 4;
+            end
+        endcase
+    end
+    
+    // Capture quantization results
+    if (oc_out_valid) begin
+        oc_results[oc_out_index] <= oc_output_val;
+    end
 end
+
+// Quantization State
+reg [31:0] oc_output_offset;
+reg [63:0] oc_params [0:255]; // {multiplier(32), bias(16), shift(16)}
+reg [7:0] oc_results [0:255]; // Multi-bank BRAM
+reg [8:0] oc_param_ptr;
+reg [8:0] oc_result_read_ptr;
+
+// Inputs to oc_quantize
+wire [ 7:0] oc_op22_index    = cmd_payload_inputs_0[7:0];
+wire [63:0] oc_op22_params   = oc_params[oc_op22_index];
+wire [31:0] oc_op22_mult     = oc_op22_params[63:32];
+wire [15:0] oc_op22_bias_16  = oc_op22_params[31:16];
+wire [15:0] oc_op22_shift_16 = oc_op22_params[15:0];
+wire [31:0] oc_op22_bias     = {{16{oc_op22_bias_16[15]}}, oc_op22_bias_16};
+wire [31:0] oc_op22_shift    = {{16{oc_op22_shift_16[15]}}, oc_op22_shift_16};
+
+wire oc_out_valid;
+wire signed [7:0] oc_output_val;
+wire [7:0] oc_out_index;
+
+oc_quantize u_oc_quantize (
+    .clk(clk),
+    .rst(reset),
+    .in_valid(cmd_valid && funct7 == 22),
+    .input_val(cmd_payload_inputs_1),
+    .in_index(oc_op22_index),
+    .bias(oc_op22_bias),
+    .output_offset(oc_output_offset),
+    .output_multiplier(oc_op22_mult),
+    .output_shift(oc_op22_shift),
+    .out_valid(oc_out_valid),
+    .output_val(oc_output_val),
+    .out_index(oc_out_index)
+);
+
+wire [31:0] packed_oc_results = {
+    oc_results[oc_result_read_ptr + 3],
+    oc_results[oc_result_read_ptr + 2],
+    oc_results[oc_result_read_ptr + 1],
+    oc_results[oc_result_read_ptr + 0]
+};
 
 wire         busy_TPU;
 
