@@ -7,6 +7,7 @@
 import tflite
 import numpy as np
 import sys
+import struct
 
 def pack_weights(input_path, output_path):
     with open(input_path, 'rb') as f:
@@ -29,8 +30,6 @@ def pack_weights(input_path, output_path):
         return
 
     print(f"Found CONV_2D opcode index: {conv_opcode_index}")
-
-    import struct
 
     # Collect all changes first
     changes = [] # List of (start_offset, new_data, buffer_obj_pos)

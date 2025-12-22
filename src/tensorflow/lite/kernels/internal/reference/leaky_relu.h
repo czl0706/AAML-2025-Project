@@ -72,7 +72,7 @@ inline void QuantizeLeakyRelu<int8_t>(const LeakyReluParams& params,
                                       const int8_t* input_data,
                                       const RuntimeShape& output_shape,
                                       int8_t* output_data) {
-  perf_enable_counter(6);
+  // perf_enable_counter(6);
   const int flat_size = MatchingFlatSize(input_shape, output_shape);
 
   // Configure CFU
@@ -104,7 +104,7 @@ inline void QuantizeLeakyRelu<int8_t>(const LeakyReluParams& params,
       p[1] = out1;
     }
   }
-  perf_disable_counter(6);
+  // perf_disable_counter(6);
 }
 
 }  // namespace reference_ops

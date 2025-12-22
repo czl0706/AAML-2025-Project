@@ -194,7 +194,7 @@ inline void ConvPerChannel(
   // Assume weights are always packed
   const uint32_t* __restrict__ packed_weights_ptr = reinterpret_cast<const uint32_t*>(filter_data);
 
-  perf_enable_counter(4);
+  // perf_enable_counter(2);
   for (int krnl_y = 0; krnl_y < K; krnl_y += TILE_K) {
     const int kk = std::min(TILE_K, K - krnl_y);
     const int ky = krnl_y + kk;
@@ -303,12 +303,12 @@ inline void ConvPerChannel(
     }
   }
 
-  perf_disable_counter(4);
+  // perf_disable_counter(2);
 
   // ----------------------------
   // Requantize + clamp
   // ----------------------------
-  perf_enable_counter(5);
+  // perf_enable_counter(3);
   constexpr int CHUNK = 256;
 
   for (int base = 0; base < output_depth; base += CHUNK) {
@@ -370,7 +370,7 @@ inline void ConvPerChannel(
       }
     }
   }
-  perf_disable_counter(5);
+  // perf_disable_counter(3);
 }
 
 inline void ConvPerChannelWithPackedInt4Weights(
