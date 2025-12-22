@@ -15,6 +15,7 @@ Different from the `Prepare the Model File` section of the [Lab website](https:/
 
 The following steps first transform the model weights into the custom layout, and then convert the model into a header file that can be used by CFU-Playground.
 ```bash
+# On project root
 wget https://github.com/ARM-software/ML-Zoo/raw/master/models/speech_recognition/wav2letter/tflite_pruned_int8/wav2letter_pruned_int8.tflite
 
 # By PEP 723 (Inline script metadata), we can run the script without setting the environment
@@ -43,23 +44,24 @@ chmod +x model_convert.sh
 
         # Or use PEP 723 (Inline script metadata) to run the script
         # This script only adds the script metadata compared to the original ones
-        uv run eval_uv.py --port /dev/ttyUSB1 (or any serial you are using)
+        # uv run eval_uv.py --port /dev/ttyUSB1 (or any serial you are using)
         ```
 
 ## Overview
 
-The accelerator is designed to offload computationally intensive operations using custom CFU operations.  
+The CFU accelerator is designed to offload computationally intensive operations via custom CFU instructions.  
 In hardware, it features a systolic array, a SIMD Leaky ReLU unit, and a hardware-accelerated quantization unit implemented in Verilog.  
-In software, ...
+In software, the accelerator is integrated into TensorFlow Lite reference kernels, with optimized host-side code for data packing, CFU command batching, and pipeline control.  
 
 ## Key Features
 
 ### 1. Systolic Array for Matrix Multiplication
+- **1D Convolution Mapping**: Enables efficient 1D convolution by reformulating convolution as matrix multiplication on the CFU.
 - **Tiled Computation**: Implements a tiled matrix multiplication architecture to handle matrix multiplication operations efficiently.
-- **Systolic Array**: Utilizes a systolic array-like structure for parallel MAC (Multiply-Accumulate) operations.
+- **Systolic Array**: Utilizes a systolic-array-based architecture for parallel MAC (Multiply-Accumulate) operations.
 
 ### 2. SIMD Leaky ReLU
-- **Parallel Processing**: Instantiates 8 parallel Leaky ReLU units to process 8 data points simultaneously.
+- **Parallel Processing**: Instantiates 8 parallel Leaky ReLU units, matching a 64-bit datapath for efficient int8 data packing.
 - **Packed I/O**: Packs 8-bit input/output values into 64-bit words for limited bandwidth between the CPU and CFU.
 
 ### 3. Hardware Quantization
@@ -73,8 +75,8 @@ In software, ...
 
 ## File Structure
 
-- **`cfu.v`**: Top-level Verilog module for the Custom Function Unit. It orchestrates the TPU, Leaky ReLU, and Quantization units.
-- **`TPU.v`**: Verilog implementation of the matrix multiplication unit.
+- **`cfu.v`**: Top-level Verilog module for the Custom Function Unit. It orchestrates the matrix multiplication, Leaky ReLU, and quantization units.
+- **`TPU.v`**: Verilog implementation of a matrix multiplication unit based on a systolic-array architecture.
 - **`leaky_relu.v`**: Verilog implementation of the Leaky ReLU activation function.
 - **`oc_quantize.v`**: Verilog implementation of the output channel quantization logic.
 - **`src/tensorflow/lite/kernels/internal/reference/integer_ops/conv.h`**: Modified TensorFlow Lite kernel header integrating the CFU operations into the convolution reference implementation.
