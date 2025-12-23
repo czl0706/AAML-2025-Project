@@ -136,8 +136,6 @@ def pack_weights(input_path, output_path):
             # Update length
             struct.pack_into('<I', new_buf, offset, len(new_data))
             # Update data
-            # We must be careful not to extend the buffer if we are just overwriting
-            # bytearray slice assignment works
             new_buf[offset + 4 : offset + 4 + len(new_data)] = new_data
             
         elif change['type'] == 'append':
@@ -150,10 +148,6 @@ def pack_weights(input_path, output_path):
             new_buf.extend(new_data)
             
             # Update Buffer table
-            # We need to re-read offsets from new_buf because we might have modified it?
-            # No, Buffer table offsets (vtable etc) are relative and inside the table, which we haven't moved.
-            # But we need to find the field_pos again.
-            
             pos = buffer_pos
             vtable_offset = struct.unpack_from('<i', new_buf, pos)[0]
             vtable_pos = pos - vtable_offset

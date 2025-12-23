@@ -33,64 +33,9 @@ static inline uint32_t pack4_u8(uint8_t b3, uint8_t b2, uint8_t b1, uint8_t b0) 
 }
 
 constexpr int kMaxIm2ColRows = 148;
-constexpr int kMaxIm2ColCols = 8000;
 constexpr int kMaxOutputDepth = 2000;
 
 static int32_t mm_result[kMaxIm2ColRows][kMaxOutputDepth];
-
-struct Im2ColPacker1D {
-  int M;
-  int input_width;
-  int pad_width;
-  int8_t neg_in_off;
-  const RuntimeShape* input_shape;
-  const int8_t* input_data;
-};
-
-// stride=1
-inline uint32_t pack_A_s1(
-    const Im2ColPacker1D& p, int mg, int in_channel, int fx) {
-
-  const int r0 = (mg << 2);
-  const int r1 = r0 + 1;
-  const int r2 = r0 + 2;
-  const int r3 = r0 + 3;
-
-  const int base = -p.pad_width + fx;   // in_x = out_x + base
-
-  auto load = [&](int out_x)->uint8_t {
-    if (out_x >= p.M) [[unlikely]] return 0;           // tail padding
-    const int in_x = out_x + base;
-    if (!((uint32_t)in_x < (uint32_t)p.input_width)) [[unlikely]]
-      return (uint8_t)p.neg_in_off;                    // image padding
-    return (uint8_t)p.input_data[Offset(*p.input_shape, 0, 0, in_x, in_channel)];
-  };
-
-  return pack4_u8(load(r0), load(r1), load(r2), load(r3));
-}
-
-// stride=2
-inline uint32_t pack_A_s2(
-    const Im2ColPacker1D& p, int mg, int in_channel, int fx) {
-
-  const int r0 = (mg << 2);
-  const int r1 = r0 + 1;
-  const int r2 = r0 + 2;
-  const int r3 = r0 + 3;
-
-  const int base = -p.pad_width + fx;   // in_x = 2*out_x + base
-
-  auto load = [&](int out_x)->uint8_t {
-    if (out_x >= p.M) [[unlikely]] return 0;
-    const int in_x = (out_x << 1) + base;
-    if (!((uint32_t)in_x < (uint32_t)p.input_width)) [[unlikely]]
-      return (uint8_t)p.neg_in_off;
-    return (uint8_t)p.input_data[Offset(*p.input_shape, 0, 0, in_x, in_channel)];
-  };
-
-  return pack4_u8(load(r0), load(r1), load(r2), load(r3));
-}
-
 
 // Fixed-point per-channel-quantization convolution reference kernel.
 inline void ConvPerChannel(
@@ -205,14 +150,7 @@ inline void ConvPerChannel(
     const int mg0 = (img_y >> 2);
     const int mg1 = std::min(M4, (my + 3) >> 2); // ceil(my/4)
 
-    // ===== Initialize the Im2Col packer (once per function call) =====
-    Im2ColPacker1D packer;
-    packer.M = M;
-    packer.input_width = input_width;
-    packer.pad_width = pad_width;
-    packer.neg_in_off = neg_in_off;
-    packer.input_shape = &input_shape;
-    packer.input_data  = input_data;
+
 
     // ===== A tile load: ONCE per K-tile =====
     cfu_op0(2, 0, 0);  // reset A stream counter
@@ -243,7 +181,21 @@ inline void ConvPerChannel(
             const int k = k_base + fx;
             if ((unsigned)(k - k0) >= (unsigned)(k1 - k0)) [[unlikely]] continue;
 
-            cfu_op0(3, 0, pack_A_s1(packer, mg, in_channel, fx));
+            const int r0 = (mg << 2);
+            const int r1 = r0 + 1;
+            const int r2 = r0 + 2;
+            const int r3 = r0 + 3;
+            const int base = -pad_width + fx;
+
+            auto load = [&](int out_x)->uint8_t {
+              if (out_x >= M) [[unlikely]] return 0;
+              const int in_x = out_x + base;
+              if (!((uint32_t)in_x < (uint32_t)input_width)) [[unlikely]]
+                return (uint8_t)neg_in_off;
+              return (uint8_t)input_data[Offset(input_shape, 0, 0, in_x, in_channel)];
+            };
+
+            cfu_op0(3, 0, pack4_u8(load(r0), load(r1), load(r2), load(r3)));
           }
         }
       }
@@ -257,7 +209,21 @@ inline void ConvPerChannel(
             const int k = k_base + fx;
             if ((unsigned)(k - k0) >= (unsigned)(k1 - k0)) [[unlikely]] continue;
 
-            cfu_op0(3, 0, pack_A_s2(packer, mg, in_channel, fx));
+            const int r0 = (mg << 2);
+            const int r1 = r0 + 1;
+            const int r2 = r0 + 2;
+            const int r3 = r0 + 3;
+            const int base = -pad_width + fx;
+
+            auto load = [&](int out_x)->uint8_t {
+              if (out_x >= M) [[unlikely]] return 0;
+              const int in_x = (out_x << 1) + base;
+              if (!((uint32_t)in_x < (uint32_t)input_width)) [[unlikely]]
+                return (uint8_t)neg_in_off;
+              return (uint8_t)input_data[Offset(input_shape, 0, 0, in_x, in_channel)];
+            };
+
+            cfu_op0(3, 0, pack4_u8(load(r0), load(r1), load(r2), load(r3)));
           }
         }
       }
