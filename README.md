@@ -19,10 +19,10 @@ The following steps first transform the model weights into the custom layout, an
 wget https://github.com/ARM-software/ML-Zoo/raw/master/models/speech_recognition/wav2letter/tflite_pruned_int8/wav2letter_pruned_int8.tflite
 
 # By PEP 723 (Inline script metadata), we can run the script without setting the environment
-# uv run convert_model.py
+# uv run pack_weights.py
 
 # Or just install tflite and numpy manually and run the script
-python3 convert_model.py
+python3 pack_weights.py
 
 # Move the packed model to the model directory
 mv wav2letter_pruned_int8_packed.tflite src/wav2letter/model/wav2letter_pruned_int8.tflite
@@ -35,7 +35,7 @@ chmod +x model_convert.sh
 
 ### Performance Test
 - Steps:
-    1. make prog && make load
+    1. `make prog && make load`
     2. Reboot LiteX.
     3. Close the litex-term terminal (Critical! To free up the UART port).
     4. Run the script:
