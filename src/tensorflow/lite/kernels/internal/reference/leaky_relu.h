@@ -81,7 +81,6 @@ inline void QuantizeLeakyRelu<int8_t>(const LeakyReluParams& params,
   cfu_op0(12, params.output_multiplier_identity, params.output_shift_identity);
 
   const int chunk_size = 200;
-  #pragma GCC unroll 4
   for (int i = 0; i < flat_size; i += chunk_size) {
     // Send inputs
     #pragma GCC unroll 4

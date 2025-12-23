@@ -139,6 +139,7 @@ inline void ConvPerChannel(
   const int TILE_N = 256; // output_depth
 
   for (int row = 0; row < M; ++row) {
+    #pragma GCC unroll 4
     for (int col = 0; col < N; ++col) {
       mm_result[row][col] = 0;
     }
@@ -158,8 +159,6 @@ inline void ConvPerChannel(
     const int mg0 = (img_y >> 3);
     const int mg1 = std::min(M8, (my + 7) >> 3); // ceil(my/8)
 
-
-
     // ===== A tile load: ONCE per K-tile =====
     cfu_op0(2, 0, 0);  // reset A stream counter
 
@@ -173,80 +172,84 @@ inline void ConvPerChannel(
     const int ic1 = (k1 + filter_width - 1) / filter_width; // ceil
     // Note: ic1 is clamped by the tile boundary, so it may be less than filter_input_depth.
 
-    if (stride_width == 1) [[likely]] {
-      for (int mg = mg0; mg < mg1; ++mg) {
+    const int input_depth = input_shape.Dims(3);
 
-        // Iterate over the input channels within the current tile.
-        for (int in_channel = ic0; in_channel < ic1; ++in_channel) {
+    // stride_width is either 1 or 2
+    const int sx   = stride_width;        // 1 or 2
+    const int step = input_depth * sx;    // pointer step per out_x increment
 
-          // Calculate the base index in the flattened kernel matrix (K) for this channel.
-          const int k_base = in_channel * filter_width;
+    for (int mg = mg0; mg < mg1; ++mg) {
+      const int r0 = (mg << 3);
+      if (r0 >= M) [[unlikely]] break;
 
-          // Iterate through the filter width. We only process indices that fall within the current tile's k-range [k0, k1).
-          // This check is typically optimized away or handled efficiently by branch prediction.
-          #pragma GCC unroll 4
-          for (int fx = 0; fx < filter_width; ++fx) {
-            const int k = k_base + fx;
-            if ((unsigned)(k - k0) >= (unsigned)(k1 - k0)) [[unlikely]] continue;
+      const int rem = M - r0;
+      const uint32_t lane_mask = (rem >= 8) ? 0xFFu : ((1u << rem) - 1u);
 
-            const int r0 = (mg << 3);
-            const int r1 = r0 + 1;
-            const int r2 = r0 + 2;
-            const int r3 = r0 + 3;
-            const int r4 = r0 + 4;
-            const int r5 = r0 + 5;
-            const int r6 = r0 + 6;
-            const int r7 = r0 + 7;
-            const int base = -pad_width + fx;
+      for (int in_channel = ic0; in_channel < ic1; ++in_channel) {
+        const int k_base = in_channel * filter_width;
 
-            auto load = [&](int out_x)->uint8_t {
-              if (out_x >= M) [[unlikely]] return 0;
-              const int in_x = out_x + base;
-              if (!((uint32_t)in_x < (uint32_t)input_width)) [[unlikely]]
-                return (uint8_t)neg_in_off;
-              return (uint8_t)input_data[Offset(input_shape, 0, 0, in_x, in_channel)];
-            };
+        int fx_lo = k0 - k_base;
+        int fx_hi = k1 - k_base;
+        if (fx_lo < 0) fx_lo = 0;
+        if (fx_hi > filter_width) fx_hi = filter_width;
+        if (fx_lo >= fx_hi) continue;
 
-            const uint64_t packed = pack8_u8(
-                load(r0), load(r1), load(r2), load(r3),
-                load(r4), load(r5), load(r6), load(r7));
-            cfu_op0(3, uint32_t(packed), uint32_t(packed >> 32));
+        const int8_t* ch_base = input_data + in_channel;
+
+        #pragma GCC unroll 4
+        for (int fx = fx_lo; fx < fx_hi; ++fx) {
+          const int base = -pad_width + fx;
+          const int in_x0 = r0 * sx + base;
+
+          uint8_t a0, a1, a2, a3, a4, a5, a6, a7;
+
+          if ((uint32_t)in_x0 < (uint32_t)input_width &&
+              (uint32_t)(in_x0 + 7 * sx) < (uint32_t)input_width) [[likely]] {
+
+            const int8_t* p = ch_base + in_x0 * input_depth;
+            a0 = uint8_t(p[0]); p += step;
+            a1 = uint8_t(p[0]); p += step;
+            a2 = uint8_t(p[0]); p += step;
+            a3 = uint8_t(p[0]); p += step;
+            a4 = uint8_t(p[0]); p += step;
+            a5 = uint8_t(p[0]); p += step;
+            a6 = uint8_t(p[0]); p += step;
+            a7 = uint8_t(p[0]);
+
+            if (lane_mask != 0xFFu) [[unlikely]] {
+              if (!(lane_mask & 0x01u)) a0 = 0;
+              if (!(lane_mask & 0x02u)) a1 = 0;
+              if (!(lane_mask & 0x04u)) a2 = 0;
+              if (!(lane_mask & 0x08u)) a3 = 0;
+              if (!(lane_mask & 0x10u)) a4 = 0;
+              if (!(lane_mask & 0x20u)) a5 = 0;
+              if (!(lane_mask & 0x40u)) a6 = 0;
+              if (!(lane_mask & 0x80u)) a7 = 0;
+            }
+
+          } else {
+            const int8_t* p = ch_base + in_x0 * input_depth;
+            int in_x = in_x0;
+
+            a0 = (lane_mask & 0x01u) ? (((uint32_t)in_x < (uint32_t)input_width) ? uint8_t(p[0]) : (uint8_t)neg_in_off) : 0;
+            in_x += sx; p += step;
+            a1 = (lane_mask & 0x02u) ? (((uint32_t)in_x < (uint32_t)input_width) ? uint8_t(p[0]) : (uint8_t)neg_in_off) : 0;
+            in_x += sx; p += step;
+            a2 = (lane_mask & 0x04u) ? (((uint32_t)in_x < (uint32_t)input_width) ? uint8_t(p[0]) : (uint8_t)neg_in_off) : 0;
+            in_x += sx; p += step;
+            a3 = (lane_mask & 0x08u) ? (((uint32_t)in_x < (uint32_t)input_width) ? uint8_t(p[0]) : (uint8_t)neg_in_off) : 0;
+            in_x += sx; p += step;
+            a4 = (lane_mask & 0x10u) ? (((uint32_t)in_x < (uint32_t)input_width) ? uint8_t(p[0]) : (uint8_t)neg_in_off) : 0;
+            in_x += sx; p += step;
+            a5 = (lane_mask & 0x20u) ? (((uint32_t)in_x < (uint32_t)input_width) ? uint8_t(p[0]) : (uint8_t)neg_in_off) : 0;
+            in_x += sx; p += step;
+            a6 = (lane_mask & 0x40u) ? (((uint32_t)in_x < (uint32_t)input_width) ? uint8_t(p[0]) : (uint8_t)neg_in_off) : 0;
+            in_x += sx; p += step;
+            a7 = (lane_mask & 0x80u) ? (((uint32_t)in_x < (uint32_t)input_width) ? uint8_t(p[0]) : (uint8_t)neg_in_off) : 0;
           }
-        }
-      }
-    } else { // stride_width == 2
-      for (int mg = mg0; mg < mg1; ++mg) {
-        for (int in_channel = ic0; in_channel < ic1; ++in_channel) {
-          const int k_base = in_channel * filter_width;
 
-          #pragma GCC unroll 4
-          for (int fx = 0; fx < filter_width; ++fx) {
-            const int k = k_base + fx;
-            if ((unsigned)(k - k0) >= (unsigned)(k1 - k0)) [[unlikely]] continue;
-
-            const int r0 = (mg << 3);
-            const int r1 = r0 + 1;
-            const int r2 = r0 + 2;
-            const int r3 = r0 + 3;
-            const int r4 = r0 + 4;
-            const int r5 = r0 + 5;
-            const int r6 = r0 + 6;
-            const int r7 = r0 + 7;
-            const int base = -pad_width + fx;
-
-            auto load = [&](int out_x)->uint8_t {
-              if (out_x >= M) [[unlikely]] return 0;
-              const int in_x = (out_x << 1) + base;
-              if (!((uint32_t)in_x < (uint32_t)input_width)) [[unlikely]]
-                return (uint8_t)neg_in_off;
-              return (uint8_t)input_data[Offset(input_shape, 0, 0, in_x, in_channel)];
-            };
-
-            const uint64_t packed = pack8_u8(
-                load(r0), load(r1), load(r2), load(r3),
-                load(r4), load(r5), load(r6), load(r7));
-            cfu_op0(3, uint32_t(packed), uint32_t(packed >> 32));
-          }
+          const uint64_t packed = pack8_u8(a0,a1,a2,a3,a4,a5,a6,a7);
+          cfu_op0(3, uint32_t(packed), uint32_t(packed >> 32));
         }
       }
     }
@@ -304,7 +307,6 @@ inline void ConvPerChannel(
   // perf_enable_counter(3);
   constexpr int CHUNK = 256;
 
-  #pragma GCC unroll 4
   for (int base = 0; base < output_depth; base += CHUNK) {
     const int chunk_size = std::min(CHUNK, output_depth - base);
     const int padded_chunk_size = std::max(72, (chunk_size + 3) & ~3);
