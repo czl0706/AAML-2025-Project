@@ -32,7 +32,7 @@ def pack_weights(input_path, output_path):
     print(f"Found CONV_2D opcode index: {conv_opcode_index}")
 
     # Collect all changes first
-    changes = [] # List of (start_offset, new_data, buffer_obj_pos)
+    changes = [] 
 
     for i in range(subgraph.OperatorsLength()):
         op = subgraph.Operators(i)
@@ -74,31 +74,51 @@ def pack_weights(input_path, output_path):
             packed_weights = packed_weights[:, :, ::-1]
             
             # Transpose to [N/4, K, 4] to optimize memory access pattern
-            # Old: [K, N/4, 4] -> Access [k][n]
-            # New: [N/4, K, 4] -> Access [n][k]
             packed_weights = packed_weights.transpose((1, 0, 2))
             
             # Flatten back to bytes
             new_data = packed_weights.flatten().tobytes()
             
-            # We need to find the offset of the OLD data to verify we are replacing the right thing
-            # But wait, we are APPENDING new data, not replacing in place (because size changed)
-            # So we don't need to find the old data offset for replacement, 
-            # but we need the buffer_obj.Pos to update the table.
+            # Check if we can overwrite
+            pos = buffer_obj._tab.Pos
+            # Read vtable offset from the ORIGINAL buffer
+            vtable_offset = struct.unpack_from('<i', buf, pos)[0]
+            vtable_pos = pos - vtable_offset
+            # Field 0 is 'data' in Buffer table
+            field_0_offset = struct.unpack_from('<H', buf, vtable_pos + 4)[0]
             
-            changes.append({
-                'buffer_pos': buffer_obj._tab.Pos,
-                'new_data': new_data,
-                'old_data_len': len(data)
-            })
+            if field_0_offset == 0:
+                print("  Error: Buffer table has no data field. Appending.")
+                changes.append({
+                    'type': 'append',
+                    'buffer_pos': pos,
+                    'data': new_data
+                })
+                continue
 
-    # Now apply changes
-    # We need to be careful about invalidating offsets if we insert data in the middle.
-    # But we are appending to the end, so existing offsets are preserved.
-    
-    # However, we need to close the model access to resize buf?
-    # tflite.Model doesn't hold a lock, but the memoryview 'data' does.
-    # We need to make sure 'data' is released.
+            field_pos = pos + field_0_offset
+            relative_offset = struct.unpack_from('<I', buf, field_pos)[0]
+            data_vector_offset = field_pos + relative_offset
+            
+            # Read existing data length
+            existing_data_len = struct.unpack_from('<I', buf, data_vector_offset)[0]
+            
+            if len(new_data) <= existing_data_len:
+                print(f"  Overwriting existing buffer at {data_vector_offset} (size {existing_data_len} -> {len(new_data)})")
+                changes.append({
+                    'type': 'overwrite',
+                    'offset': data_vector_offset,
+                    'data': new_data
+                })
+            else:
+                print(f"  Appending new buffer (size {existing_data_len} -> {len(new_data)})")
+                changes.append({
+                    'type': 'append',
+                    'buffer_pos': pos,
+                    'data': new_data
+                })
+
+    # Release TFLite objects
     del data
     del buffer_obj
     del filter_tensor
@@ -106,37 +126,47 @@ def pack_weights(input_path, output_path):
     del subgraph
     del model
     
-    # Create a new mutable buffer to avoid BufferError
+    # Create a new mutable buffer
     new_buf = bytearray(buf)
     
-    import struct
-    
     for change in changes:
-        new_data = change['new_data']
-        buffer_pos = change['buffer_pos']
-        
-        # Append new data
-        new_data_offset = len(new_buf)
-        new_buf.extend(struct.pack('<I', len(new_data)))
-        new_buf.extend(new_data)
-        
-        # Update Buffer table
-        # We need to re-parse or just use the saved pos.
-        # The pos is an offset in buf, which hasn't changed for the existing tables.
-        
-        pos = buffer_pos
-        vtable_offset = struct.unpack_from('<i', new_buf, pos)[0]
-        vtable_pos = pos - vtable_offset
-        field_0_offset = struct.unpack_from('<H', new_buf, vtable_pos + 4)[0]
-        
-        if field_0_offset == 0:
-            print(f"  Error: Buffer table at {pos} has no data field.")
-            continue
+        if change['type'] == 'overwrite':
+            offset = change['offset']
+            new_data = change['data']
+            # Update length
+            struct.pack_into('<I', new_buf, offset, len(new_data))
+            # Update data
+            # We must be careful not to extend the buffer if we are just overwriting
+            # bytearray slice assignment works
+            new_buf[offset + 4 : offset + 4 + len(new_data)] = new_data
             
-        field_pos = pos + field_0_offset
-        new_relative_offset = new_data_offset - field_pos
-        struct.pack_into('<I', new_buf, field_pos, new_relative_offset)
-        print(f"  Updated Buffer table at {pos} to point to new data at {new_data_offset}")
+        elif change['type'] == 'append':
+            new_data = change['data']
+            buffer_pos = change['buffer_pos']
+            
+            # Append new data
+            new_data_offset = len(new_buf)
+            new_buf.extend(struct.pack('<I', len(new_data)))
+            new_buf.extend(new_data)
+            
+            # Update Buffer table
+            # We need to re-read offsets from new_buf because we might have modified it?
+            # No, Buffer table offsets (vtable etc) are relative and inside the table, which we haven't moved.
+            # But we need to find the field_pos again.
+            
+            pos = buffer_pos
+            vtable_offset = struct.unpack_from('<i', new_buf, pos)[0]
+            vtable_pos = pos - vtable_offset
+            field_0_offset = struct.unpack_from('<H', new_buf, vtable_pos + 4)[0]
+            
+            if field_0_offset == 0:
+                print(f"  Error: Buffer table at {pos} has no data field.")
+                continue
+                
+            field_pos = pos + field_0_offset
+            new_relative_offset = new_data_offset - field_pos
+            struct.pack_into('<I', new_buf, field_pos, new_relative_offset)
+            print(f"  Updated Buffer table at {pos} to point to new data at {new_data_offset}")
 
     with open(output_path, 'wb') as f:
         f.write(new_buf)
