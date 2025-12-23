@@ -60,20 +60,21 @@ def pack_weights(input_path, output_path):
             K = C_in * H * W
             flat_weights = transposed_weights.reshape((K, N))
             
-            if N % 4 != 0:
-                pad_len = 4 - (N % 4)
+            GROUP = 8
+            if N % GROUP != 0:
+                pad_len = GROUP - (N % GROUP)
                 print(f"  Padding output depth {N} with {pad_len} zeros to {N + pad_len}")
                 padding = np.zeros((K, pad_len), dtype=flat_weights.dtype)
                 flat_weights = np.concatenate((flat_weights, padding), axis=1)
                 N = N + pad_len
             
-            # Reshape to [K, N/4, 4]
-            packed_weights = flat_weights.reshape((K, N // 4, 4))
+            # Reshape to [K, N/GROUP, GROUP]
+            packed_weights = flat_weights.reshape((K, N // GROUP, GROUP))
             
-            # Reverse the last dimension (c0, c1, c2, c3 -> c3, c2, c1, c0)
+            # Reverse the last dimension (c0..c7 -> c7..c0)
             packed_weights = packed_weights[:, :, ::-1]
             
-            # Transpose to [N/4, K, 4] to optimize memory access pattern
+            # Transpose to [N/GROUP, K, GROUP] to optimize memory access pattern
             packed_weights = packed_weights.transpose((1, 0, 2))
             
             # Flatten back to bytes

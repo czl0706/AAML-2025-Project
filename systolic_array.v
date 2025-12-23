@@ -8,43 +8,82 @@ module systolic_array (
     input  [  7:0] in_u1,
     input  [  7:0] in_u2,
     input  [  7:0] in_u3,
+    input  [  7:0] in_u4,
+    input  [  7:0] in_u5,
+    input  [  7:0] in_u6,
+    input  [  7:0] in_u7,
     input  [  7:0] in_l0,
     input  [  7:0] in_l1,
     input  [  7:0] in_l2,
     input  [  7:0] in_l3,
-    output [127:0] out_r0,
-    output [127:0] out_r1,
-    output [127:0] out_r2,
-    output [127:0] out_r3
+    input  [  7:0] in_l4,
+    input  [  7:0] in_l5,
+    input  [  7:0] in_l6,
+    input  [  7:0] in_l7,
+    output [255:0] out_r0,
+    output [255:0] out_r1,
+    output [255:0] out_r2,
+    output [255:0] out_r3,
+    output [255:0] out_r4,
+    output [255:0] out_r5,
+    output [255:0] out_r6,
+    output [255:0] out_r7
 );
 
-wire [31:0] PE_out [0:3][0:3];
-wire [ 7:0] PE_h   [0:3][0:3];
-wire [ 7:0] PE_v   [0:3][0:3];
+wire [31:0] PE_out [0:7][0:7];
+wire [ 7:0] PE_h   [0:7][0:7];
+wire [ 7:0] PE_v   [0:7][0:7];
 
-assign out_r0 = {PE_out[0][0], PE_out[0][1], PE_out[0][2], PE_out[0][3]};
-assign out_r1 = {PE_out[1][0], PE_out[1][1], PE_out[1][2], PE_out[1][3]};
-assign out_r2 = {PE_out[2][0], PE_out[2][1], PE_out[2][2], PE_out[2][3]};
-assign out_r3 = {PE_out[3][0], PE_out[3][1], PE_out[3][2], PE_out[3][3]};
+genvar r, c;
+generate
+    for (r = 0; r < 8; r = r + 1) begin : row_gen
+        for (c = 0; c < 8; c = c + 1) begin : col_gen
+            wire [7:0] u_in = (r == 0) ? (c == 0 ? in_u0 :
+                                           c == 1 ? in_u1 :
+                                           c == 2 ? in_u2 :
+                                           c == 3 ? in_u3 :
+                                           c == 4 ? in_u4 :
+                                           c == 5 ? in_u5 :
+                                           c == 6 ? in_u6 : in_u7)
+                                       : PE_v[r-1][c];
+            wire [7:0] l_in = (c == 0) ? (r == 0 ? in_l0 :
+                                           r == 1 ? in_l1 :
+                                           r == 2 ? in_l2 :
+                                           r == 3 ? in_l3 :
+                                           r == 4 ? in_l4 :
+                                           r == 5 ? in_l5 :
+                                           r == 6 ? in_l6 : in_l7)
+                                       : PE_h[r][c-1];
+            PE cxx (
+                .clk(clk),
+                .rst_n(rst_n),
+                .U(u_in),
+                .L(l_in),
+                .D(PE_v[r][c]),
+                .R(PE_h[r][c]),
+                .out(PE_out[r][c]),
+                .off(offset)
+            );
+        end
+    end
+endgenerate
 
-PE c00 ( .clk(clk), .rst_n(rst_n), .U(in_u0     ), .L(in_l0     ), .D(PE_v[0][0]), .R(PE_h[0][0]), .out(PE_out[0][0]), .off(offset) );
-PE c01 ( .clk(clk), .rst_n(rst_n), .U(in_u1     ), .L(PE_h[0][0]), .D(PE_v[0][1]), .R(PE_h[0][1]), .out(PE_out[0][1]), .off(offset) );
-PE c02 ( .clk(clk), .rst_n(rst_n), .U(in_u2     ), .L(PE_h[0][1]), .D(PE_v[0][2]), .R(PE_h[0][2]), .out(PE_out[0][2]), .off(offset) );
-PE c03 ( .clk(clk), .rst_n(rst_n), .U(in_u3     ), .L(PE_h[0][2]), .D(PE_v[0][3]), .R(PE_h[0][3]), .out(PE_out[0][3]), .off(offset) );
+wire [255:0] out_rows [0:7];
 
-PE c10 ( .clk(clk), .rst_n(rst_n), .U(PE_v[0][0]), .L(in_l1     ), .D(PE_v[1][0]), .R(PE_h[1][0]), .out(PE_out[1][0]), .off(offset) );
-PE c11 ( .clk(clk), .rst_n(rst_n), .U(PE_v[0][1]), .L(PE_h[1][0]), .D(PE_v[1][1]), .R(PE_h[1][1]), .out(PE_out[1][1]), .off(offset) );
-PE c12 ( .clk(clk), .rst_n(rst_n), .U(PE_v[0][2]), .L(PE_h[1][1]), .D(PE_v[1][2]), .R(PE_h[1][2]), .out(PE_out[1][2]), .off(offset) );
-PE c13 ( .clk(clk), .rst_n(rst_n), .U(PE_v[0][3]), .L(PE_h[1][2]), .D(PE_v[1][3]), .R(PE_h[1][3]), .out(PE_out[1][3]), .off(offset) );
+generate
+    for (r = 0; r < 8; r = r + 1) begin : pack_rows
+        assign out_rows[r] = {PE_out[r][0], PE_out[r][1], PE_out[r][2], PE_out[r][3],
+                              PE_out[r][4], PE_out[r][5], PE_out[r][6], PE_out[r][7]};
+    end
+endgenerate
 
-PE c20 ( .clk(clk), .rst_n(rst_n), .U(PE_v[1][0]), .L(in_l2     ), .D(PE_v[2][0]), .R(PE_h[2][0]), .out(PE_out[2][0]), .off(offset) );
-PE c21 ( .clk(clk), .rst_n(rst_n), .U(PE_v[1][1]), .L(PE_h[2][0]), .D(PE_v[2][1]), .R(PE_h[2][1]), .out(PE_out[2][1]), .off(offset) );
-PE c22 ( .clk(clk), .rst_n(rst_n), .U(PE_v[1][2]), .L(PE_h[2][1]), .D(PE_v[2][2]), .R(PE_h[2][2]), .out(PE_out[2][2]), .off(offset) );
-PE c23 ( .clk(clk), .rst_n(rst_n), .U(PE_v[1][3]), .L(PE_h[2][2]), .D(PE_v[2][3]), .R(PE_h[2][3]), .out(PE_out[2][3]), .off(offset) );
-
-PE c30 ( .clk(clk), .rst_n(rst_n), .U(PE_v[2][0]), .L(in_l3     ), .D(PE_v[3][0]), .R(PE_h[3][0]), .out(PE_out[3][0]), .off(offset) );
-PE c31 ( .clk(clk), .rst_n(rst_n), .U(PE_v[2][1]), .L(PE_h[3][0]), .D(PE_v[3][1]), .R(PE_h[3][1]), .out(PE_out[3][1]), .off(offset) );
-PE c32 ( .clk(clk), .rst_n(rst_n), .U(PE_v[2][2]), .L(PE_h[3][1]), .D(PE_v[3][2]), .R(PE_h[3][2]), .out(PE_out[3][2]), .off(offset) );
-PE c33 ( .clk(clk), .rst_n(rst_n), .U(PE_v[2][3]), .L(PE_h[3][2]), .D(PE_v[3][3]), .R(PE_h[3][3]), .out(PE_out[3][3]), .off(offset) );
+assign out_r0 = out_rows[0];
+assign out_r1 = out_rows[1];
+assign out_r2 = out_rows[2];
+assign out_r3 = out_rows[3];
+assign out_r4 = out_rows[4];
+assign out_r5 = out_rows[5];
+assign out_r6 = out_rows[6];
+assign out_r7 = out_rows[7];
 
 endmodule

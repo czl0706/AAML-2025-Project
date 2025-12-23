@@ -16,6 +16,7 @@ limitations under the License.
 #define TENSORFLOW_LITE_KERNELS_INTERNAL_REFERENCE_INTEGER_OPS_CONV_H_
 
 #include <algorithm>
+#include <cstdint>
 
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/portable_tensor_utils.h"
@@ -30,6 +31,13 @@ namespace reference_integer_ops {
 
 static inline uint32_t pack4_u8(uint8_t b3, uint8_t b2, uint8_t b1, uint8_t b0) {
   return (uint32_t(b3) << 24) | (uint32_t(b2) << 16) | (uint32_t(b1) << 8) | uint32_t(b0);
+}
+
+static inline uint64_t pack8_u8(uint8_t b7, uint8_t b6, uint8_t b5, uint8_t b4,
+                                uint8_t b3, uint8_t b2, uint8_t b1, uint8_t b0) {
+  return (uint64_t(b7) << 56) | (uint64_t(b6) << 48) | (uint64_t(b5) << 40) |
+         (uint64_t(b4) << 32) | (uint64_t(b3) << 24) | (uint64_t(b2) << 16) |
+         (uint64_t(b1) << 8) | uint64_t(b0);
 }
 
 constexpr int kMaxIm2ColRows = 148;
@@ -72,9 +80,9 @@ inline void ConvPerChannel(
   const int M = output_height * output_width;                         // im2col_rows
   const int K = filter_height * filter_width * filter_input_depth;    // kernel_rows
   // const int img_off = filter_height * filter_width;
-  const int M4 = (M + 3) >> 2;
+  const int M8 = (M + 7) >> 3;
   const int N  = output_depth;
-  const int N4 = (N + 3) >> 2;
+  const int N8 = (N + 7) >> 3;
 
   // perf_enable_counter(3);
   // for (int k = 0; k < K; ++k) {
@@ -123,8 +131,8 @@ inline void ConvPerChannel(
   // perf_disable_counter(3);
 
   // Shape of matrices:
-  // m_im2col_packed: [M/4][K]
-  // packed_weights:  [N/4][K]
+  // m_im2col_packed: [M/8][K]
+  // packed_weights:  [N/8][K]
   // mm_result:       [M][N]
   const int TILE_M = 148; // im2col_rows
   const int TILE_K = 256; // kernel_rows
@@ -137,7 +145,7 @@ inline void ConvPerChannel(
   }
 
   // Assume weights are always packed
-  const uint32_t* __restrict__ packed_weights_ptr = reinterpret_cast<const uint32_t*>(filter_data);
+  const uint64_t* __restrict__ packed_weights_ptr = reinterpret_cast<const uint64_t*>(filter_data);
 
   // perf_enable_counter(2);
   for (int krnl_y = 0; krnl_y < K; krnl_y += TILE_K) {
@@ -147,8 +155,8 @@ inline void ConvPerChannel(
     const int img_y = 0;
     const int mm  = std::min(TILE_M, M - img_y);
     const int my  = img_y + mm;
-    const int mg0 = (img_y >> 2);
-    const int mg1 = std::min(M4, (my + 3) >> 2); // ceil(my/4)
+    const int mg0 = (img_y >> 3);
+    const int mg1 = std::min(M8, (my + 7) >> 3); // ceil(my/8)
 
 
 
@@ -181,10 +189,14 @@ inline void ConvPerChannel(
             const int k = k_base + fx;
             if ((unsigned)(k - k0) >= (unsigned)(k1 - k0)) [[unlikely]] continue;
 
-            const int r0 = (mg << 2);
+            const int r0 = (mg << 3);
             const int r1 = r0 + 1;
             const int r2 = r0 + 2;
             const int r3 = r0 + 3;
+            const int r4 = r0 + 4;
+            const int r5 = r0 + 5;
+            const int r6 = r0 + 6;
+            const int r7 = r0 + 7;
             const int base = -pad_width + fx;
 
             auto load = [&](int out_x)->uint8_t {
@@ -195,7 +207,10 @@ inline void ConvPerChannel(
               return (uint8_t)input_data[Offset(input_shape, 0, 0, in_x, in_channel)];
             };
 
-            cfu_op0(3, 0, pack4_u8(load(r0), load(r1), load(r2), load(r3)));
+            const uint64_t packed = pack8_u8(
+                load(r0), load(r1), load(r2), load(r3),
+                load(r4), load(r5), load(r6), load(r7));
+            cfu_op0(3, uint32_t(packed), uint32_t(packed >> 32));
           }
         }
       }
@@ -209,10 +224,14 @@ inline void ConvPerChannel(
             const int k = k_base + fx;
             if ((unsigned)(k - k0) >= (unsigned)(k1 - k0)) [[unlikely]] continue;
 
-            const int r0 = (mg << 2);
+            const int r0 = (mg << 3);
             const int r1 = r0 + 1;
             const int r2 = r0 + 2;
             const int r3 = r0 + 3;
+            const int r4 = r0 + 4;
+            const int r5 = r0 + 5;
+            const int r6 = r0 + 6;
+            const int r7 = r0 + 7;
             const int base = -pad_width + fx;
 
             auto load = [&](int out_x)->uint8_t {
@@ -223,7 +242,10 @@ inline void ConvPerChannel(
               return (uint8_t)input_data[Offset(input_shape, 0, 0, in_x, in_channel)];
             };
 
-            cfu_op0(3, 0, pack4_u8(load(r0), load(r1), load(r2), load(r3)));
+            const uint64_t packed = pack8_u8(
+                load(r0), load(r1), load(r2), load(r3),
+                load(r4), load(r5), load(r6), load(r7));
+            cfu_op0(3, uint32_t(packed), uint32_t(packed >> 32));
           }
         }
       }
@@ -234,8 +256,8 @@ inline void ConvPerChannel(
       const int kx = krnl_x + nn;
 
       // ---- compute ng range exactly (no break in loop)
-      const int ng0 = (krnl_x >> 2);
-      const int ng1 = std::min(N4, (kx + 3) >> 2);
+      const int ng0 = (krnl_x >> 3);
+      const int ng1 = std::min(N8, (kx + 7) >> 3);
 
       // ============================
       // Load B tile into CFU (per N-tile)
@@ -245,7 +267,8 @@ inline void ConvPerChannel(
         const int base = ng * K;
         #pragma GCC unroll 4
         for (int k = krnl_y; k < ky; ++k) {
-          cfu_op0(4, 0, packed_weights_ptr[base + k]); // [ng][k]
+          const uint64_t w = packed_weights_ptr[base + k]; // [ng][k]
+          cfu_op0(4, uint32_t(w), uint32_t(w >> 32));
         }
       }
 
@@ -259,11 +282,15 @@ inline void ConvPerChannel(
       // Read results
       for (int row = img_y; row < my; ++row) {
         #pragma GCC unroll 4
-        for (int col = krnl_x; col < kx; col += 4) {
+        for (int col = krnl_x; col < kx; col += 8) {
           mm_result[row][col + 0] += cfu_op0(5, 0, 0);
           mm_result[row][col + 1] += cfu_op0(5, 0, 1);
           mm_result[row][col + 2] += cfu_op0(5, 0, 2);
           mm_result[row][col + 3] += cfu_op0(5, 0, 3);
+          mm_result[row][col + 4] += cfu_op0(5, 0, 4);
+          mm_result[row][col + 5] += cfu_op0(5, 0, 5);
+          mm_result[row][col + 6] += cfu_op0(5, 0, 6);
+          mm_result[row][col + 7] += cfu_op0(5, 0, 7);
         }
       }
     }

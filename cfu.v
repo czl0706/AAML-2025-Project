@@ -63,10 +63,14 @@ always @(*) begin
     if (cmd_valid) begin
         case (funct7)
              0: rsp_payload_outputs_0 = busy_TPU;
-             5: rsp_payload_outputs_0 = cmd_payload_inputs_1 == 3 ? C_data_out[ 31: 0] :
-                                       cmd_payload_inputs_1 == 2 ? C_data_out[ 63:32] :
-                                       cmd_payload_inputs_1 == 1 ? C_data_out[ 95:64] :
-                                       cmd_payload_inputs_1 == 0 ? C_data_out[127:96] : 32'b0;
+             5: rsp_payload_outputs_0 = cmd_payload_inputs_1 == 7 ? C_data_out[ 31: 0]  :
+                                       cmd_payload_inputs_1 == 6 ? C_data_out[ 63:32]  :
+                                       cmd_payload_inputs_1 == 5 ? C_data_out[ 95:64]  :
+                                       cmd_payload_inputs_1 == 4 ? C_data_out[127:96]  :
+                                       cmd_payload_inputs_1 == 3 ? C_data_out[159:128] :
+                                       cmd_payload_inputs_1 == 2 ? C_data_out[191:160] :
+                                       cmd_payload_inputs_1 == 1 ? C_data_out[223:192] :
+                                       cmd_payload_inputs_1 == 0 ? C_data_out[255:224] : 32'b0;
             14: rsp_payload_outputs_0 = cmd_payload_inputs_1[0] ? lrelu_bram_data_out[63:32] : lrelu_bram_data_out[31:0];
             23: rsp_payload_outputs_0 = packed_oc_results;
         endcase
@@ -77,18 +81,18 @@ reg [13:0] write_index;
 
 wire        A_wr_en   = (cmd_valid && funct7 == 3);
 wire [13:0] A_index   = A_wr_en ? write_index : A_index_TPU[13:0];
-wire [31:0] A_data_in = cmd_payload_inputs_1;
-wire [31:0] A_data_out;
+wire [63:0] A_data_in = {cmd_payload_inputs_1, cmd_payload_inputs_0};
+wire [63:0] A_data_out;
 
 wire        B_wr_en   = (cmd_valid && funct7 == 4);
 wire [13:0] B_index   = B_wr_en ? write_index : B_index_TPU[13:0];
-wire [31:0] B_data_in = cmd_payload_inputs_1;
-wire [31:0] B_data_out;
+wire [63:0] B_data_in = {cmd_payload_inputs_1, cmd_payload_inputs_0};
+wire [63:0] B_data_out;
 
 wire         C_wr_en   = C_wr_en_TPU;
 wire [ 13:0] C_index   = (cmd_valid && funct7 == 5) ? read_index : C_index_TPU[13:0];
-wire [127:0] C_data_in = C_data_in_TPU;
-wire [127:0] C_data_out;
+wire [255:0] C_data_in = C_data_in_TPU;
+wire [255:0] C_data_out;
 
 reg [ 9:0] M;
 reg [ 9:0] K;
@@ -117,8 +121,8 @@ wire [7:0] lrelu_output_val [0:7];
 reg [7:0] lrelu_seq_num;
 wire [63:0] lrelu_bram_data_out;
 
-wire [ 9:0] Nb_M = M[9:2] + |M[1:0];
-wire [13:0] stride_col = {4'b0, Nb_M, 2'b00};
+wire [ 9:0] Nb_M = M[9:3] + |M[2:0];
+wire [13:0] stride_col = {Nb_M, 3'b000};
 
 // TPU control signal
 always @(posedge clk) begin
@@ -147,16 +151,16 @@ always @(posedge clk) begin
         read_r <= 0;
         read_c <= 0;
     end 
-    // Auto-increment read_index when reading the last word (index 3)
-    else if (cmd_valid && funct7 == 5 && cmd_payload_inputs_1 == 3) begin
-        if (read_c + 4 >= N) begin
+    // Auto-increment read_index when reading the last word (index 7)
+    else if (cmd_valid && funct7 == 5 && cmd_payload_inputs_1 == 7) begin
+        if (read_c + 8 >= N) begin
             // End of row, move to next row
             read_c <= 0;
             read_r <= read_r + 1;
             read_index <= {4'b0, read_r} + 1;
         end else begin
             // Next column block
-            read_c <= read_c + 4;
+            read_c <= read_c + 8;
             read_index <= read_index + stride_col;
         end
     end
@@ -269,16 +273,16 @@ wire [31:0] packed_oc_results = {
 
 wire         busy_TPU;
 
-wire [ 31:0] A_data_out_TPU = A_data_out;
-wire [ 31:0] B_data_out_TPU = B_data_out;
-wire [127:0] C_data_out_TPU = C_data_out;
+wire [ 63:0] A_data_out_TPU = A_data_out;
+wire [ 63:0] B_data_out_TPU = B_data_out;
+wire [255:0] C_data_out_TPU = C_data_out;
 
-wire [15:0]  A_index_TPU; 
-wire [15:0]  B_index_TPU; 
-wire [15:0]  C_index_TPU; 
+wire [13:0]  A_index_TPU; 
+wire [13:0]  B_index_TPU; 
+wire [13:0]  C_index_TPU; 
 
 wire         C_wr_en_TPU;
-wire [127:0] C_data_in_TPU; 
+wire [255:0] C_data_in_TPU; 
 
 TPU u_TPU (
     .clk            (clk),     
@@ -308,7 +312,7 @@ TPU u_TPU (
     .C_data_out     (C_data_out_TPU)     
 );
 
-global_buffer_bram #( .ADDR_BITS(14), .DATA_BITS(32) ) 
+global_buffer_bram #( .ADDR_BITS(13), .DATA_BITS(64) ) 
 gbuff_A (
     .clk     (clk       ),
     .rst_n   (1'b1      ),
@@ -328,7 +332,7 @@ gbuff_B (
     .data_out(B_data_out)
 );
 
-global_buffer_bram #( .ADDR_BITS(14), .DATA_BITS(128) ) 
+global_buffer_bram #( .ADDR_BITS(13), .DATA_BITS(256) ) 
 gbuff_C (
     .clk     (clk       ),
     .rst_n   (1'b1      ),
