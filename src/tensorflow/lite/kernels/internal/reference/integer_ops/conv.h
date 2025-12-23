@@ -311,6 +311,7 @@ inline void ConvPerChannel(
   // perf_enable_counter(3);
   constexpr int CHUNK = 256;
 
+  #pragma GCC unroll 4
   for (int base = 0; base < output_depth; base += CHUNK) {
     const int chunk_size = std::min(CHUNK, output_depth - base);
     const int padded_chunk_size = std::max(72, (chunk_size + 3) & ~3);
@@ -319,6 +320,7 @@ inline void ConvPerChannel(
     cfu_op0(20, 1, output_offset);
 
     // 2) Load Params (branchless: two-phase)
+    #pragma GCC unroll 4
     for (int j = 0; j < chunk_size; ++j) {
       const int ch = base + j;
       const uint32_t args_in0 =
@@ -337,6 +339,7 @@ inline void ConvPerChannel(
 
       // Push Accumulators (branchless: two-phase)
       const int32_t* accp = &mm_result[row][base];
+      #pragma GCC unroll 4
       for (int j = 0; j < chunk_size; ++j) {
         cfu_op0(22, j, accp[j]);
       }
@@ -352,6 +355,7 @@ inline void ConvPerChannel(
       // Process full groups of 4. It's safe to store 4 bytes because of padding, 
       // but we only care about valid data up to chunk_size.
       int j = 0;
+      #pragma GCC unroll 4
       for (; j + 3 < chunk_size; j += 4) {
         const uint32_t packed = cfu_op0(23, 0, 0);
         outp[j + 0] = int8_t(uint8_t(packed >>  0));
